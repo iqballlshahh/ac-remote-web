@@ -97,12 +97,30 @@
 
 <dialog id="add-dialog" class="dialog">
   <h2>Add a device</h2>
-  <p class="dim">Enter the 6-digit claim code shown on the device's setup page.</p>
-  <input id="claim-code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
-  <div id="add-status" class="dim"></div>
+  <p class="dim" id="add-intro">
+    Power on your new AC Remote and make sure it's nearby. Pairing uses
+    Bluetooth and takes about 30 seconds.
+    <br><br>
+    <strong>Chrome on Android, Mac, or Windows required.</strong>
+    iPhone Safari doesn't support Web Bluetooth.
+  </p>
+
+  <label>Device name</label>
+  <input id="pair-name" type="text" placeholder="Living Room AC" maxlength="32" autocomplete="off">
+
+  <label>Home WiFi network name (SSID)</label>
+  <input id="pair-ssid" type="text" placeholder="MyHomeWiFi" autocomplete="off">
+
+  <label>WiFi password</label>
+  <input id="pair-pass" type="password" placeholder="••••••••" autocomplete="off">
+
+  <div id="add-progress" class="dim" style="display:none; margin-top:14px">
+    <div id="add-progress-msg">Looking for device…</div>
+  </div>
+
   <div class="dialog-row">
     <button class="ghost" id="add-cancel">cancel</button>
-    <button class="primary" id="add-submit">claim</button>
+    <button class="primary" id="add-submit">pair device</button>
   </div>
 </dialog>
 
@@ -144,6 +162,7 @@
 <div id="toast" class="toast"></div>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
 <script src="config.js"></script>
 <script type="module" src="aws-iot.js"></script>
 <script type="module" src="app.js"></script>
