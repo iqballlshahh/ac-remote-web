@@ -1,16 +1,18 @@
-// Cognito Identity + SigV4 + MQTT — pure browser, no SDK, no polyfills.
-// We call the two Cognito Identity endpoints we need (GetId, GetCredentialsForIdentity)
-// directly over fetch. Both are unauthenticated — the caller's Google ID token is the
-// credential. Then we sign the MQTT-over-WSS URL with SigV4 using Web Crypto API.
+// Cognito Identity + SigV4 + MQTT 3.1.1 over WebSocket.
+// No external dependencies. Pure browser code.
 
 const cfg = window.APP_CONFIG;
 
-let creds = null;            // { accessKeyId, secretAccessKey, sessionToken, expiration }
-let identityId = null;       // Cognito identity ID — used as user_id everywhere
+let creds = null;
+let identityId = null;
 let googleIdToken = null;
 
 const COGNITO_ENDPOINT = `https://cognito-identity.${cfg.AWS_REGION}.amazonaws.com/`;
+const KEEPALIVE_SEC = 60;
 
+// ============================================================
+// COGNITO — federate Google ID token to AWS temp credentials
+// ============================================================
 async function cognitoCall(target, body) {
   const resp = await fetch(COGNITO_ENDPOINT, {
     method: 'POST',
@@ -35,13 +37,11 @@ async function cognitoCall(target, body) {
 export async function signInWithGoogle(idToken) {
   googleIdToken = idToken;
   const loginKey = 'accounts.google.com';
-
   const idRes = await cognitoCall('GetId', {
     IdentityPoolId: cfg.COGNITO_IDENTITY_POOL_ID,
     Logins: { [loginKey]: idToken },
   });
   identityId = idRes.IdentityId;
-
   const credRes = await cognitoCall('GetCredentialsForIdentity', {
     IdentityId: identityId,
     Logins: { [loginKey]: idToken },
@@ -75,16 +75,12 @@ function toHex(bytes) {
 }
 
 export async function signIotWebSocketUrl() {
-  const region   = cfg.AWS_REGION;
-  const host     = cfg.IOT_ENDPOINT;
-  const service  = 'iotdevicegateway';
-  const method   = 'GET';
-  const path     = '/mqtt';
-
+  const region = cfg.AWS_REGION, host = cfg.IOT_ENDPOINT;
+  const service = 'iotdevicegateway', method = 'GET', path = '/mqtt';
   const now = new Date();
-  const amzDate    = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
-  const dateStamp  = amzDate.slice(0, 8);
-  const credScope  = `${dateStamp}/${region}/${service}/aws4_request`;
+  const amzDate   = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const credScope = `${dateStamp}/${region}/${service}/aws4_request`;
 
   const queryParams = {
     'X-Amz-Algorithm':     'AWS4-HMAC-SHA256',
@@ -94,21 +90,14 @@ export async function signIotWebSocketUrl() {
     'X-Amz-SignedHeaders': 'host',
   };
   const canonicalQuery = Object.keys(queryParams).sort()
-    .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(queryParams[k])}`)
-    .join('&');
-
-  const canonicalHeaders = `host:${host}\n`;
-  const signedHeaders    = 'host';
-  const payloadHash      = await sha256Hex('');
+    .map(k => `${encodeURIComponent(k)}=${encodeURIComponent(queryParams[k])}`).join('&');
 
   const canonicalRequest = [
     method, path, canonicalQuery,
-    canonicalHeaders, signedHeaders, payloadHash,
+    `host:${host}\n`, 'host', await sha256Hex(''),
   ].join('\n');
-
   const stringToSign = [
-    'AWS4-HMAC-SHA256', amzDate, credScope,
-    await sha256Hex(canonicalRequest),
+    'AWS4-HMAC-SHA256', amzDate, credScope, await sha256Hex(canonicalRequest),
   ].join('\n');
 
   const kDate    = await hmac(new TextEncoder().encode('AWS4' + creds.secretAccessKey), dateStamp);
@@ -118,43 +107,97 @@ export async function signIotWebSocketUrl() {
   const sig      = toHex(await hmac(kSigning, stringToSign));
 
   let url = `wss://${host}${path}?${canonicalQuery}&X-Amz-Signature=${sig}`;
-  if (creds.sessionToken) {
-    url += `&X-Amz-Security-Token=${encodeURIComponent(creds.sessionToken)}`;
-  }
+  if (creds.sessionToken) url += `&X-Amz-Security-Token=${encodeURIComponent(creds.sessionToken)}`;
   return url;
 }
 
 // ============================================================
-// MQTT client — wraps mqtt.js (loaded globally from CDN)
+// MQTT 3.1.1 wire protocol — hand-rolled, just what we need
 // ============================================================
-let client = null;
-const handlers = new Map();
-
-export async function mqttConnect() {
-  const url = await signIotWebSocketUrl();
-  return new Promise((resolve, reject) => {
-    client = window.mqtt.connect(url, {
-      protocol: 'wss',
-      reconnectPeriod: 4000,
-      keepalive: 60,
-      clientId: 'web-' + Math.random().toString(36).slice(2, 10),
-    });
-    client.on('connect', () => resolve(client));
-    client.on('error',   reject);
-    client.on('message', (topic, payload) => {
-      const text = payload.toString();
-      let json = null;
-      try { json = JSON.parse(text); } catch {}
-      for (const [pattern, handler] of handlers) {
-        if (topicMatches(pattern, topic)) handler(topic, json ?? text);
-      }
-    });
-  });
+function concat(...arrays) {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
 }
 
+function encVarLen(n) {
+  const bytes = [];
+  do {
+    let b = n & 0x7F;
+    n >>>= 7;
+    if (n > 0) b |= 0x80;
+    bytes.push(b);
+  } while (n > 0);
+  return new Uint8Array(bytes);
+}
+
+function decVarLen(data, off) {
+  let mult = 1, value = 0, i = off, byte;
+  do {
+    if (i >= data.length) return null;
+    byte = data[i++];
+    value += (byte & 0x7F) * mult;
+    mult *= 128;
+    if (mult > 128 ** 3) return null;
+  } while (byte & 0x80);
+  return { length: value, bytesRead: i - off };
+}
+
+function encStr(s) {
+  const utf = new TextEncoder().encode(s);
+  const out = new Uint8Array(2 + utf.length);
+  out[0] = (utf.length >> 8) & 0xff;
+  out[1] = utf.length & 0xff;
+  out.set(utf, 2);
+  return out;
+}
+
+function decStr(data, off) {
+  const len = (data[off] << 8) | data[off + 1];
+  const str = new TextDecoder().decode(data.subarray(off + 2, off + 2 + len));
+  return { str, bytesRead: 2 + len };
+}
+
+function packCONNECT(clientId) {
+  const varHdr = concat(
+    encStr('MQTT'),
+    new Uint8Array([0x04, 0x02, (KEEPALIVE_SEC >> 8) & 0xff, KEEPALIVE_SEC & 0xff]),
+  );
+  const payload = encStr(clientId);
+  const remaining = varHdr.length + payload.length;
+  return concat(new Uint8Array([0x10]), encVarLen(remaining), varHdr, payload);
+}
+
+function packSUBSCRIBE(packetId, topic) {
+  const pid = new Uint8Array([(packetId >> 8) & 0xff, packetId & 0xff]);
+  const payload = concat(encStr(topic), new Uint8Array([0x00]));
+  const remaining = pid.length + payload.length;
+  return concat(new Uint8Array([0x82]), encVarLen(remaining), pid, payload);
+}
+
+function packPUBLISH(topic, body) {
+  const topicBytes = encStr(topic);
+  const payloadBytes = new TextEncoder().encode(body);
+  const remaining = topicBytes.length + payloadBytes.length;
+  return concat(new Uint8Array([0x30]), encVarLen(remaining), topicBytes, payloadBytes);
+}
+
+const PINGREQ    = new Uint8Array([0xC0, 0x00]);
+const DISCONNECT = new Uint8Array([0xE0, 0x00]);
+
+// ============================================================
+// MQTT client API — public, used by app.js
+// ============================================================
+let socket = null;
+const handlers = new Map();
+let pingTimer = null;
+let nextPacketId = 1;
+let recvBuffer = new Uint8Array(0);
+
 function topicMatches(pattern, topic) {
-  const pp = pattern.split('/');
-  const tp = topic.split('/');
+  const pp = pattern.split('/'), tp = topic.split('/');
   for (let i = 0; i < pp.length; i++) {
     if (pp[i] === '#') return true;
     if (pp[i] === '+') continue;
@@ -163,18 +206,86 @@ function topicMatches(pattern, topic) {
   return pp.length === tp.length;
 }
 
+function handleIncomingPacket(packetType, body) {
+  if (packetType === 0x30) {        // PUBLISH (QoS 0)
+    const ts = decStr(body, 0);
+    const topic = ts.str;
+    const payload = new TextDecoder().decode(body.subarray(ts.bytesRead));
+    let json = null;
+    try { json = JSON.parse(payload); } catch {}
+    for (const [pattern, handler] of handlers) {
+      if (topicMatches(pattern, topic)) handler(topic, json ?? payload);
+    }
+  }
+  // SUBACK (0x90), PINGRESP (0xD0) — ignored
+}
+
+export async function mqttConnect() {
+  const url = await signIotWebSocketUrl();
+  const clientId = 'web-' + Math.random().toString(36).slice(2, 10);
+
+  return new Promise((resolve, reject) => {
+    socket = new WebSocket(url, ['mqtt']);
+    socket.binaryType = 'arraybuffer';
+
+    socket.onopen = () => socket.send(packCONNECT(clientId));
+
+    socket.onmessage = (ev) => {
+      recvBuffer = concat(recvBuffer, new Uint8Array(ev.data));
+      while (recvBuffer.length >= 2) {
+        const packetType = recvBuffer[0] & 0xF0;
+        const lenInfo = decVarLen(recvBuffer, 1);
+        if (!lenInfo) break;
+        const total = 1 + lenInfo.bytesRead + lenInfo.length;
+        if (recvBuffer.length < total) break;
+        const body = recvBuffer.subarray(1 + lenInfo.bytesRead, total);
+
+        if (packetType === 0x20) {  // CONNACK
+          const rc = body[1];
+          if (rc === 0) {
+            console.log('MQTT connected');
+            pingTimer = setInterval(() => {
+              if (socket?.readyState === WebSocket.OPEN) socket.send(PINGREQ);
+            }, (KEEPALIVE_SEC - 5) * 1000);
+            resolve();
+          } else {
+            reject(new Error('MQTT CONNACK rejected, code=' + rc));
+          }
+        } else {
+          handleIncomingPacket(packetType, body);
+        }
+        recvBuffer = recvBuffer.subarray(total);
+      }
+    };
+
+    socket.onerror = () => reject(new Error('WebSocket failed'));
+    socket.onclose = (e) => {
+      console.log('MQTT closed, code=', e.code);
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    };
+
+    setTimeout(() => reject(new Error('MQTT connect timeout')), 15000);
+  });
+}
+
 export function mqttSubscribe(topic, handler) {
-  if (!client) throw new Error('not connected');
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('not connected');
   handlers.set(topic, handler);
-  client.subscribe(topic, { qos: 0 });
+  socket.send(packSUBSCRIBE(nextPacketId++, topic));
 }
 
 export function mqttPublish(topic, payload) {
-  if (!client) throw new Error('not connected');
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('not connected');
   const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  client.publish(topic, body, { qos: 0 });
+  socket.send(packPUBLISH(topic, body));
 }
 
 export function mqttDisconnect() {
-  if (client) { client.end(true); client = null; handlers.clear(); }
+  if (socket?.readyState === WebSocket.OPEN) {
+    try { socket.send(DISCONNECT); } catch {}
+    socket.close();
+  }
+  socket = null;
+  handlers.clear();
+  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
 }
