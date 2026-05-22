@@ -225,7 +225,7 @@ export async function mqttConnect() {
   const clientId = 'web-' + Math.random().toString(36).slice(2, 10);
 
   return new Promise((resolve, reject) => {
-    socket = new WebSocket(url, ['mqtt']);
+    socket = new WebSocket(url, ['mqttv3.1.1']);
     socket.binaryType = 'arraybuffer';
 
     socket.onopen = () => socket.send(packCONNECT(clientId));
