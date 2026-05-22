@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#3b82f6">
+<title>AC Remote</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="screen-login" class="screen active">
+  <div class="brand">
+    <div class="brand-glow"></div>
+    <h1>AC Remote</h1>
+    <p>Sign in to control your devices from anywhere.</p>
+  </div>
+  <div id="google-btn-wrap"></div>
+  <p class="footer-note">Your account, your devices. No third-party cloud.</p>
+</div>
+
+<div id="screen-loading" class="screen">
+  <div class="spinner"></div>
+  <p id="loading-msg">connecting</p>
+</div>
+
+<div id="screen-devices" class="screen">
+  <header class="topbar">
+    <div class="user">
+      <img id="user-avatar" src="" alt="">
+      <div>
+        <div class="user-name" id="user-name"></div>
+        <div class="user-email" id="user-email"></div>
+      </div>
+    </div>
+    <button class="iconbtn" id="logout-btn" title="sign out">⏻</button>
+  </header>
+  <h2 class="page-title">My devices</h2>
+  <div class="device-list" id="device-list"></div>
+  <button class="cta" id="add-device-btn">+ add device</button>
+</div>
+
+<div id="screen-control" class="screen control-screen">
+  <header class="topbar">
+    <button class="iconbtn" id="back-btn">←</button>
+    <h2 id="control-title">Device</h2>
+    <button class="iconbtn" id="settings-btn">⚙</button>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="smart">smart</button>
+    <button class="tab" data-tab="custom">custom</button>
+  </div>
+
+  <section id="tab-smart" class="tab-pane active">
+    <div class="display">
+      <div class="display-row">
+        <span class="status-pill" id="power-pill">off</span>
+        <span class="brand-pill" id="brand-pill">Daikin</span>
+      </div>
+      <div class="temp-big">
+        <span id="temp-num">24</span><sup>°</sup>
+      </div>
+      <div class="display-row">
+        <span class="mode-pill" id="mode-pill">cool</span>
+        <span class="fan-pill" id="fan-pill">auto</span>
+      </div>
+    </div>
+
+    <div class="temp-controls">
+      <button class="temp-btn" id="temp-down">−</button>
+      <button class="temp-btn" id="temp-up">+</button>
+    </div>
+
+    <button class="power-btn" id="power-btn">Power</button>
+
+    <div class="section-label">mode</div>
+    <div class="grid-5" id="mode-grid"></div>
+
+    <div class="section-label">fan</div>
+    <div class="grid-4" id="fan-grid"></div>
+  </section>
+
+  <section id="tab-custom" class="tab-pane">
+    <p class="tab-intro">
+      Learn buttons one at a time. Useful when the smart protocols don't match
+      your AC, or for any other IR remote (TV, fan, projector).
+    </p>
+    <div class="custom-grid" id="custom-grid"></div>
+    <button class="cta" id="learn-btn">+ learn new button</button>
+  </section>
+</div>
+
+<dialog id="add-dialog" class="dialog">
+  <h2>Add a device</h2>
+  <p class="dim">Enter the 6-digit claim code shown on the device's setup page.</p>
+  <input id="claim-code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+  <div id="add-status" class="dim"></div>
+  <div class="dialog-row">
+    <button class="ghost" id="add-cancel">cancel</button>
+    <button class="primary" id="add-submit">claim</button>
+  </div>
+</dialog>
+
+<dialog id="settings-dialog" class="dialog">
+  <h2>Device settings</h2>
+
+  <label>Name</label>
+  <input id="settings-name" type="text" maxlength="32">
+
+  <label>AC brand / protocol</label>
+  <select id="settings-protocol"></select>
+
+  <p class="dim" style="margin-top:18px">
+    Don't see your brand or it doesn't respond? Use the
+    <strong>custom</strong> tab to learn buttons from your real remote.
+  </p>
+
+  <hr>
+
+  <button class="danger" id="settings-reset">factory reset device</button>
+
+  <div class="dialog-row">
+    <button class="ghost" id="settings-cancel">close</button>
+    <button class="primary" id="settings-save">save</button>
+  </div>
+</dialog>
+
+<dialog id="learn-dialog" class="dialog">
+  <h2>Learn a button</h2>
+  <label>Button label</label>
+  <input id="learn-name" type="text" placeholder="e.g. cool 24 low" maxlength="24">
+  <p class="dim" id="learn-status">After clicking start, press the button on your real remote within 12 seconds, aimed at the device.</p>
+  <div class="dialog-row">
+    <button class="ghost" id="learn-cancel">cancel</button>
+    <button class="primary" id="learn-start">start</button>
+  </div>
+</dialog>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
+<script src="config.js"></script>
+<script type="module" src="aws-iot.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
