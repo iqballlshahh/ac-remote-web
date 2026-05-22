@@ -52,7 +52,6 @@ const BRANDS = [
 let user        = null;       // { name, email, picture }
 let userSub     = null;       // Cognito identity ID
 let devices     = new Map();  // device_id -> { name, state, online, lastSeen }
-let claimSeen   = new Map();  // device_id -> { name, code }
 let currentDevice = null;     // device_id while on control screen
 let currentButtons = [];      // raw button names
 
@@ -133,10 +132,6 @@ function setupSubscriptions() {
     const id = topic.split('/')[4];
     handleEvent(id, msg);
   });
-  mqttSubscribe(`ac-remote/claims/+/announce`, (topic, msg) => {
-    if (!msg || !msg.device_id || !msg.code) return;
-    claimSeen.set(msg.device_id, { name: msg.name, code: msg.code });
-  });
 }
 
 // ============================================================
@@ -180,45 +175,95 @@ document.getElementById('logout-btn').onclick = () => {
 };
 
 // ============================================================
-// ADD DEVICE (CLAIM)
+// ADD DEVICE — Web Bluetooth pairing
 // ============================================================
+const BLE_SERVICE_UUID     = '7c30b8e2-cabb-4a2e-8d05-e44bd6a3a8e1';
+const BLE_CHAR_CONFIG_UUID = '7c30b8e2-cabb-4a2e-8d05-e44bd6a3a8e2';
+const BLE_CHAR_STATUS_UUID = '7c30b8e2-cabb-4a2e-8d05-e44bd6a3a8e3';
+
 document.getElementById('add-device-btn').onclick = () => {
-  document.getElementById('claim-code').value = '';
-  document.getElementById('add-status').textContent = '';
+  document.getElementById('pair-name').value = '';
+  document.getElementById('pair-ssid').value = '';
+  document.getElementById('pair-pass').value = '';
+  document.getElementById('add-progress').style.display = 'none';
   document.getElementById('add-dialog').showModal();
 };
 document.getElementById('add-cancel').onclick = (e) => {
-  e.preventDefault(); document.getElementById('add-dialog').close();
+  e.preventDefault();
+  document.getElementById('add-dialog').close();
 };
 document.getElementById('add-submit').onclick = async (e) => {
   e.preventDefault();
-  const code = document.getElementById('claim-code').value.trim();
-  if (!/^\d{6}$/.test(code)) { toast('enter a 6-digit code'); return; }
-  const status = document.getElementById('add-status');
-  status.textContent = 'looking for device with that code…';
+  const name = document.getElementById('pair-name').value.trim();
+  const ssid = document.getElementById('pair-ssid').value.trim();
+  const pass = document.getElementById('pair-pass').value;
+  if (!name || !ssid) { toast('fill in name and WiFi SSID'); return; }
 
-  // Wait up to 8s for the device to broadcast a matching code
-  const found = await new Promise((resolve) => {
-    const tryFind = () => {
-      for (const [id, info] of claimSeen) {
-        if (info.code === code) return resolve({ id, info });
-      }
-      return null;
-    };
-    if (tryFind()) return;
-    const interval = setInterval(() => { const r = tryFind(); if (r) { clearInterval(interval); resolve(r); } }, 500);
-    setTimeout(() => { clearInterval(interval); resolve(null); }, 8000);
-  });
-
-  if (!found) {
-    status.textContent = 'no device found with that code. is it online and broadcasting?';
+  if (!navigator.bluetooth) {
+    toast('Web Bluetooth not supported in this browser', 4000);
     return;
   }
 
-  mqttPublish(`ac-remote/claims/${found.id}/confirm`, { code, user_id: userSub });
-  status.textContent = 'claimed! the device will reconnect in a few seconds.';
-  setTimeout(() => document.getElementById('add-dialog').close(), 2000);
+  const progress = document.getElementById('add-progress');
+  const progressMsg = document.getElementById('add-progress-msg');
+  progress.style.display = 'block';
+  progressMsg.textContent = 'Asking your browser to pick a device…';
+
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [BLE_SERVICE_UUID] }],
+    });
+    progressMsg.textContent = `Connecting to ${device.name}…`;
+
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SERVICE_UUID);
+    const cfgChar = await service.getCharacteristic(BLE_CHAR_CONFIG_UUID);
+    const statusChar = await service.getCharacteristic(BLE_CHAR_STATUS_UUID);
+
+    // Subscribe to status notifications so we can show progress live
+    await statusChar.startNotifications();
+    statusChar.addEventListener('characteristicvaluechanged', (ev) => {
+      const s = new TextDecoder().decode(ev.target.value);
+      progressMsg.textContent = humanizeStatus(s);
+      if (s === 'connected') {
+        setTimeout(() => {
+          document.getElementById('add-dialog').close();
+          toast('device paired!');
+        }, 1500);
+      }
+    });
+
+    progressMsg.textContent = 'Sending config to device…';
+    const config = {
+      ssid, pass, name,
+      user_id: userSub,
+    };
+    const payload = new TextEncoder().encode(JSON.stringify(config));
+    await cfgChar.writeValue(payload);
+
+    progressMsg.textContent = 'Config sent. Device is connecting to WiFi…';
+    // The device will notify us via the status characteristic as it progresses.
+    // If notifications stop arriving (e.g. device disconnects BLE on success),
+    // the user can close the dialog manually.
+  } catch (err) {
+    progressMsg.textContent = 'Pairing failed: ' + err.message;
+  }
 };
+
+function humanizeStatus(s) {
+  switch (s) {
+    case 'waiting':         return 'Device ready, waiting for config…';
+    case 'applying':        return 'Device received config, applying…';
+    case 'connecting_wifi': return 'Device connecting to your WiFi…';
+    case 'connecting_mqtt': return 'Device connecting to the cloud…';
+    case 'connected':       return '✓ Paired! Device is online.';
+    case 'error_wifi':      return '✗ WiFi connection failed. Wrong SSID or password?';
+    case 'error_mqtt':      return '✗ Cloud connection failed. Device may still come online — check your device list in a minute.';
+    case 'error_invalid_json':
+    case 'error_missing_fields': return '✗ Internal error sending config.';
+    default: return s;
+  }
+}
 
 // ============================================================
 // CONTROL SCREEN
