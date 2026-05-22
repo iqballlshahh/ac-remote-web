@@ -86,6 +86,19 @@ window.addEventListener('load', () => {
   });
   google.accounts.id.renderButton(document.getElementById('google-btn-wrap'),
     { theme: 'filled_blue', size: 'large', shape: 'pill', text: 'continue_with' });
+
+  // Try silent restore using a previously cached ID token (within its 1-hour validity)
+  const cached = sessionStorage.getItem('google_id_token');
+  if (cached) {
+    try {
+      const claims = JSON.parse(atob(cached.split('.')[1]));
+      if (claims.exp * 1000 > Date.now() + 60_000) {
+        onGoogleCredential({ credential: cached });
+        return;
+      }
+    } catch {}
+    sessionStorage.removeItem('google_id_token');
+  }
   show('screen-login');
 });
 
@@ -98,6 +111,7 @@ async function onGoogleCredential(resp) {
   try {
     const { identityId } = await signInWithGoogle(idToken);
     userSub = identityId;
+    sessionStorage.setItem('google_id_token', idToken);
     document.getElementById('user-name').textContent  = user.name;
     document.getElementById('user-email').textContent = user.email;
     document.getElementById('user-avatar').src        = user.picture;
@@ -106,11 +120,18 @@ async function onGoogleCredential(resp) {
     await mqttConnect();
     setupSubscriptions();
 
+    // AWS IoT pushes retained messages after SUBSCRIBE+SUBACK, but with a small
+    // delay. Wait briefly so existing devices populate before we show the list,
+    // otherwise the user sees "no devices yet" for a beat and may panic.
+    setLoading('loading devices');
+    await new Promise(r => setTimeout(r, 1500));
+
     show('screen-devices');
     refreshDeviceList();
   } catch (err) {
     console.error(err);
     toast('sign-in failed: ' + err.message, 4000);
+    sessionStorage.removeItem('google_id_token');
     show('screen-login');
   }
 }
@@ -170,6 +191,7 @@ function refreshDeviceList() {
 document.getElementById('logout-btn').onclick = () => {
   mqttDisconnect();
   devices.clear(); userSub = null; user = null;
+  sessionStorage.removeItem('google_id_token');
   google.accounts.id.disableAutoSelect();
   show('screen-login');
 };
