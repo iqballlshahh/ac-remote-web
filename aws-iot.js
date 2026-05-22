@@ -1,8 +1,7 @@
-import {
-  CognitoIdentityClient,
-  GetIdCommand,
-  GetCredentialsForIdentityCommand,
-} from 'https://esm.sh/@aws-sdk/client-cognito-identity@3.658.0';
+// Cognito Identity + SigV4 + MQTT — pure browser, no SDK, no polyfills.
+// We call the two Cognito Identity endpoints we need (GetId, GetCredentialsForIdentity)
+// directly over fetch. Both are unauthenticated — the caller's Google ID token is the
+// credential. Then we sign the MQTT-over-WSS URL with SigV4 using Web Crypto API.
 
 const cfg = window.APP_CONFIG;
 
@@ -10,22 +9,43 @@ let creds = null;            // { accessKeyId, secretAccessKey, sessionToken, ex
 let identityId = null;       // Cognito identity ID — used as user_id everywhere
 let googleIdToken = null;
 
-const cog = new CognitoIdentityClient({ region: cfg.AWS_REGION });
+const COGNITO_ENDPOINT = `https://cognito-identity.${cfg.AWS_REGION}.amazonaws.com/`;
+
+async function cognitoCall(target, body) {
+  const resp = await fetch(COGNITO_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-amz-json-1.1',
+      'X-Amz-Target': `AWSCognitoIdentityService.${target}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  if (!resp.ok) {
+    let msg = text;
+    try {
+      const j = JSON.parse(text);
+      msg = `${j.__type || 'Error'}: ${j.message || j.Message || text}`;
+    } catch {}
+    throw new Error(`Cognito ${target} failed (${resp.status}): ${msg}`);
+  }
+  return JSON.parse(text);
+}
 
 export async function signInWithGoogle(idToken) {
   googleIdToken = idToken;
   const loginKey = 'accounts.google.com';
 
-  const idRes = await cog.send(new GetIdCommand({
+  const idRes = await cognitoCall('GetId', {
     IdentityPoolId: cfg.COGNITO_IDENTITY_POOL_ID,
     Logins: { [loginKey]: idToken },
-  }));
+  });
   identityId = idRes.IdentityId;
 
-  const credRes = await cog.send(new GetCredentialsForIdentityCommand({
+  const credRes = await cognitoCall('GetCredentialsForIdentity', {
     IdentityId: identityId,
     Logins: { [loginKey]: idToken },
-  }));
+  });
   creds = {
     accessKeyId:     credRes.Credentials.AccessKeyId,
     secretAccessKey: credRes.Credentials.SecretKey,
@@ -62,8 +82,8 @@ export async function signIotWebSocketUrl() {
   const path     = '/mqtt';
 
   const now = new Date();
-  const amzDate    = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');   // 20260521T120000Z
-  const dateStamp  = amzDate.slice(0, 8);                                // 20260521
+  const amzDate    = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+  const dateStamp  = amzDate.slice(0, 8);
   const credScope  = `${dateStamp}/${region}/${service}/aws4_request`;
 
   const queryParams = {
@@ -108,7 +128,7 @@ export async function signIotWebSocketUrl() {
 // MQTT client — wraps mqtt.js (loaded globally from CDN)
 // ============================================================
 let client = null;
-const handlers = new Map();   // topicPattern -> handler(topic, payload)
+const handlers = new Map();
 
 export async function mqttConnect() {
   const url = await signIotWebSocketUrl();
