@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AWS IoT debug</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; color: #1a1a1a; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: #666; font-size: 14px; margin-bottom: 20px; }
+  button { background: #3b82f6; color: white; border: none; padding: 10px 18px; font-size: 14px; border-radius: 8px; cursor: pointer; margin-right: 10px; }
+  button:disabled { background: #ccc; cursor: not-allowed; }
+  pre { background: #f4f6f9; border: 1px solid #e0e4ea; padding: 14px; border-radius: 8px; font-size: 12px; line-height: 1.55; overflow-x: auto; max-height: 700px; }
+  .ok { color: #15803d; font-weight: 600; }
+  .bad { color: #dc2626; font-weight: 600; }
+  .info { color: #6366f1; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>AWS IoT MQTT debug</h1>
+<p class="sub">Runs six probes against AWS IoT to find which (subprotocol, packet) combination it accepts.</p>
+
+<div id="signin"></div>
+<button id="run" disabled>Run all tests</button>
+<button id="copy" disabled>Copy results</button>
+
+<pre id="out">Waiting for sign-in...
+</pre>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="config.js"></script>
+<script type="module">
+const cfg = window.APP_CONFIG;
+const out = document.getElementById('out');
+let creds = null;
+
+function log(msg, cls) {
+  const span = cls ? `<span class="${cls}">${msg}</span>` : msg;
+  out.innerHTML += span + '\n';
+  out.scrollTop = out.scrollHeight;
+}
+function clearLog() { out.innerHTML = ''; }
+
+// ============================================================
+// AUTH (Google → Cognito)
+// ============================================================
+window.addEventListener('load', () => {
+  google.accounts.id.initialize({
+    client_id: cfg.GOOGLE_CLIENT_ID,
+    callback: onGoogleCredential,
+  });
+  google.accounts.id.renderButton(document.getElementById('signin'),
+    { theme: 'filled_blue', size: 'large', text: 'signin_with' });
+});
+
+async function onGoogleCredential(resp) {
+  clearLog();
+  log('Got Google ID token, exchanging for Cognito creds...', 'info');
+  try {
+    const idRes = await fetch(`https://cognito-identity.${cfg.AWS_REGION}.amazonaws.com/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-amz-json-1.1', 'X-Amz-Target': 'AWSCognitoIdentityService.GetId' },
+      body: JSON.stringify({ IdentityPoolId: cfg.COGNITO_IDENTITY_POOL_ID, Logins: { 'accounts.google.com': resp.credential } }),
+    }).then(r => r.json());
+    log(`  identity ID: ${idRes.IdentityId}`);
+    const credRes = await fetch(`https://cognito-identity.${cfg.AWS_REGION}.amazonaws.com/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-amz-json-1.1', 'X-Amz-Target': 'AWSCognitoIdentityService.GetCredentialsForIdentity' },
+      body: JSON.stringify({ IdentityId: idRes.IdentityId, Logins: { 'accounts.google.com': resp.credential } }),
+    }).then(r => r.json());
+    creds = {
+      accessKeyId: credRes.Credentials.AccessKeyId,
+      secretAccessKey: credRes.Credentials.SecretKey,
+      sessionToken: credRes.Credentials.SessionToken,
+    };
+    log(`  access key: ${creds.accessKeyId}`);
+    log('Ready. Click "Run all tests".', 'ok');
+    document.getElementById('run').disabled = false;
+  } catch (e) {
+    log(`AUTH FAILED: ${e.message}`, 'bad');
+  }
+}
+
+// ============================================================
+// SIGV4
+// ============================================================
+async function hmac(keyData, msg) {
+  const key = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg)));
+}
+async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const toHex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+
+async function signUrl() {
+  const region = cfg.AWS_REGION, host = cfg.IOT_ENDPOINT;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const credScope = `${dateStamp}/${region}/iotdevicegateway/aws4_request`;
+  const qp = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${creds.accessKeyId}/${credScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': '86400',
+    'X-Amz-SignedHeaders': 'host',
+  };
+  const cq = Object.keys(qp).sort().map(k => `${encodeURIComponent(k)}=${encodeURIComponent(qp[k])}`).join('&');
+  const cr = ['GET', '/mqtt', cq, `host:${host}\n`, 'host', await sha256Hex('')].join('\n');
+  const sts = ['AWS4-HMAC-SHA256', amzDate, credScope, await sha256Hex(cr)].join('\n');
+  const kDate    = await hmac(new TextEncoder().encode('AWS4' + creds.secretAccessKey), dateStamp);
+  const kRegion  = await hmac(kDate, region);
+  const kService = await hmac(kRegion, 'iotdevicegateway');
+  const kSigning = await hmac(kService, 'aws4_request');
+  const sig = toHex(await hmac(kSigning, sts));
+  let url = `wss://${host}/mqtt?${cq}&X-Amz-Signature=${sig}`;
+  if (creds.sessionToken) url += `&X-Amz-Security-Token=${encodeURIComponent(creds.sessionToken)}`;
+  return url;
+}
+
+// ============================================================
+// MQTT PACKET BUILDERS
+// ============================================================
+function varLen(n) {
+  const b = [];
+  do { let x = n & 0x7F; n >>>= 7; if (n > 0) x |= 0x80; b.push(x); } while (n > 0);
+  return b;
+}
+
+function mqtt311Connect(clientId) {
+  const cid = [...new TextEncoder().encode(clientId)];
+  const varHdr = [0,4, 0x4d,0x51,0x54,0x54, 0x04, 0x02, 0,60];
+  const payload = [(cid.length>>8)&0xff, cid.length&0xff, ...cid];
+  const rem = varHdr.length + payload.length;
+  return new Uint8Array([0x10, ...varLen(rem), ...varHdr, ...payload]);
+}
+
+function mqtt5Connect(clientId) {
+  const cid = [...new TextEncoder().encode(clientId)];
+  const varHdr = [0,4, 0x4d,0x51,0x54,0x54, 0x05, 0x02, 0,60, 0x00];  // 0x00 = props length 0
+  const payload = [(cid.length>>8)&0xff, cid.length&0xff, ...cid];
+  const rem = varHdr.length + payload.length;
+  return new Uint8Array([0x10, ...varLen(rem), ...varHdr, ...payload]);
+}
+
+// ============================================================
+// TEST RUNNER
+// ============================================================
+function runOne(name, subprotocol, packet, waitMs = 6000) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const stamp = () => `+${(Date.now() - t0).toString().padStart(4)}ms`;
+    log(`\n--- ${name} ---`, 'info');
+    log(`subprotocol: ${subprotocol || '(none)'}`);
+    signUrl().then(url => {
+      const args = subprotocol ? [url, [subprotocol]] : [url];
+      const ws = new WebSocket(...args);
+      ws.binaryType = 'arraybuffer';
+      let gotAnything = false;
+      ws.onopen = () => {
+        log(`${stamp()}  OPEN  (negotiated subprotocol: '${ws.protocol}')`);
+        if (packet) {
+          ws.send(packet);
+          log(`${stamp()}  SENT ${packet.length} bytes: ${toHex(packet)}`);
+        } else {
+          log(`${stamp()}  (sending no packet, just waiting)`);
+        }
+      };
+      ws.onmessage = (e) => {
+        gotAnything = true;
+        const b = new Uint8Array(e.data);
+        log(`${stamp()}  RECV ${b.length} bytes: ${toHex(b)}`, 'ok');
+      };
+      ws.onerror = () => log(`${stamp()}  ERROR event`, 'bad');
+      ws.onclose = (e) => {
+        log(`${stamp()}  CLOSE code=${e.code} clean=${e.wasClean} reason="${e.reason || ''}"`, e.code === 1000 ? 'ok' : 'bad');
+        resolve(gotAnything);
+      };
+      setTimeout(() => { if (ws.readyState !== WebSocket.CLOSED) ws.close(); }, waitMs);
+    }).catch(e => { log(`signing failed: ${e.message}`, 'bad'); resolve(false); });
+  });
+}
+
+document.getElementById('run').onclick = async () => {
+  document.getElementById('run').disabled = true;
+  clearLog();
+  log('Starting tests. Each waits up to 6 seconds.', 'info');
+
+  // Tests in order — each is independent
+  await runOne('Test 1: subprotocol mqtt, no packet (idle)',         'mqtt',          null);
+  await runOne('Test 2: subprotocol mqttv3.1.1, no packet (idle)',   'mqttv3.1.1',    null);
+  await runOne('Test 3: subprotocol mqtt + MQTT 3.1.1 CONNECT',      'mqtt',          mqtt311Connect('dbg-' + Date.now()));
+  await runOne('Test 4: subprotocol mqttv3.1.1 + MQTT 3.1.1 CONNECT','mqttv3.1.1',    mqtt311Connect('dbg-' + Date.now()));
+  await runOne('Test 5: subprotocol mqtt + MQTT 5.0 CONNECT',        'mqtt',          mqtt5Connect('dbg-' + Date.now()));
+  await runOne('Test 6: subprotocol mqttv3.1.1 + MQTT 5.0 CONNECT',  'mqttv3.1.1',    mqtt5Connect('dbg-' + Date.now()));
+
+  log('\n=== DONE. Copy the whole output above and paste back. ===', 'info');
+  document.getElementById('run').disabled = false;
+  document.getElementById('copy').disabled = false;
+};
+
+document.getElementById('copy').onclick = () => {
+  navigator.clipboard.writeText(out.innerText);
+  log('\n(copied to clipboard)', 'ok');
+};
+</script>
+</body>
+</html>
