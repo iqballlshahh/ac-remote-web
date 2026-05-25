@@ -1,4 +1,4 @@
-// Cognito Identity + SigV4 + MQTT 5.0 over WebSocket.
+// Cognito Identity + SigV4 + MQTT 3.1.1 over WebSocket + DynamoDB queries.
 // Pure browser, no external libraries.
 
 const cfg = window.APP_CONFIG;
@@ -9,7 +9,7 @@ const COGNITO_ENDPOINT = `https://cognito-identity.${cfg.AWS_REGION}.amazonaws.c
 const KEEPALIVE_SEC = 60;
 
 // ============================================================
-// COGNITO (unchanged)
+// COGNITO
 // ============================================================
 async function cognitoCall(target, body) {
   const resp = await fetch(COGNITO_ENDPOINT, {
@@ -49,7 +49,7 @@ export function getIdentityId() { return identityId; }
 export function getCreds()      { return creds; }
 
 // ============================================================
-// SIGV4 (unchanged)
+// SIGV4 — building blocks
 // ============================================================
 async function hmac(keyData, msg) {
   const key = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -61,6 +61,16 @@ async function sha256Hex(s) {
 }
 const toHex = b => [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 
+async function signingKey(dateStamp, region, service) {
+  const k1 = await hmac(new TextEncoder().encode('AWS4' + creds.secretAccessKey), dateStamp);
+  const k2 = await hmac(k1, region);
+  const k3 = await hmac(k2, service);
+  return await hmac(k3, 'aws4_request');
+}
+
+// ============================================================
+// SIGV4 — IoT WebSocket URL signing
+// ============================================================
 export async function signIotWebSocketUrl() {
   const region = cfg.AWS_REGION, host = cfg.IOT_ENDPOINT;
   const now = new Date();
@@ -77,18 +87,108 @@ export async function signIotWebSocketUrl() {
   const cq = Object.keys(qp).sort().map(k => `${encodeURIComponent(k)}=${encodeURIComponent(qp[k])}`).join('&');
   const cr = ['GET', '/mqtt', cq, `host:${host}\n`, 'host', await sha256Hex('')].join('\n');
   const sts = ['AWS4-HMAC-SHA256', amzDate, credScope, await sha256Hex(cr)].join('\n');
-  const kDate    = await hmac(new TextEncoder().encode('AWS4' + creds.secretAccessKey), dateStamp);
-  const kRegion  = await hmac(kDate, region);
-  const kService = await hmac(kRegion, 'iotdevicegateway');
-  const kSigning = await hmac(kService, 'aws4_request');
-  const sig = toHex(await hmac(kSigning, sts));
+  const sig = toHex(await hmac(await signingKey(dateStamp, region, 'iotdevicegateway'), sts));
+
   let url = `wss://${host}/mqtt?${cq}&X-Amz-Signature=${sig}`;
   if (creds.sessionToken) url += `&X-Amz-Security-Token=${encodeURIComponent(creds.sessionToken)}`;
   return url;
 }
 
 // ============================================================
-// MQTT 5.0 wire protocol
+// SIGV4 — POST request signing (for DynamoDB)
+// ============================================================
+async function signedPostHeaders(host, target, body) {
+  const region = cfg.AWS_REGION;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const credScope = `${dateStamp}/${region}/dynamodb/aws4_request`;
+  const payloadHash = await sha256Hex(body);
+
+  // Canonical headers must be in alphabetical order, lowercase
+  const headersForSigning = {
+    'content-type': 'application/x-amz-json-1.0',
+    'host': host,
+    'x-amz-date': amzDate,
+    'x-amz-target': target,
+  };
+  if (creds.sessionToken) headersForSigning['x-amz-security-token'] = creds.sessionToken;
+
+  const sortedNames = Object.keys(headersForSigning).sort();
+  const canonicalHeaders = sortedNames.map(n => `${n}:${headersForSigning[n]}\n`).join('');
+  const signedHeaders = sortedNames.join(';');
+
+  const canonicalRequest = ['POST', '/', '', canonicalHeaders, signedHeaders, payloadHash].join('\n');
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, credScope, await sha256Hex(canonicalRequest)].join('\n');
+  const signature = toHex(await hmac(await signingKey(dateStamp, region, 'dynamodb'), stringToSign));
+
+  return {
+    'Content-Type': 'application/x-amz-json-1.0',
+    'X-Amz-Date': amzDate,
+    'X-Amz-Target': target,
+    ...(creds.sessionToken ? { 'X-Amz-Security-Token': creds.sessionToken } : {}),
+    'Authorization': `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${credScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  };
+}
+
+// ============================================================
+// DYNAMODB
+// ============================================================
+export async function dynamoQuery(tableName, partitionKeyName, partitionKeyValue) {
+  const host = `dynamodb.${cfg.AWS_REGION}.amazonaws.com`;
+  const target = 'DynamoDB_20120810.Query';
+  const body = JSON.stringify({
+    TableName: tableName,
+    KeyConditionExpression: '#pk = :pkv',
+    ExpressionAttributeNames: { '#pk': partitionKeyName },
+    ExpressionAttributeValues: { ':pkv': { S: partitionKeyValue } },
+  });
+  const headers = await signedPostHeaders(host, target, body);
+  const resp = await fetch(`https://${host}/`, { method: 'POST', headers, body });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`DynamoDB Query failed (${resp.status}): ${text}`);
+  const parsed = JSON.parse(text);
+  return (parsed.Items || []).map(dynamoToPlain);
+}
+
+export async function dynamoDelete(tableName, partitionKeyName, partitionKeyValue, sortKeyName, sortKeyValue) {
+  const host = `dynamodb.${cfg.AWS_REGION}.amazonaws.com`;
+  const target = 'DynamoDB_20120810.DeleteItem';
+  const body = JSON.stringify({
+    TableName: tableName,
+    Key: {
+      [partitionKeyName]: { S: partitionKeyValue },
+      [sortKeyName]: { S: sortKeyValue },
+    },
+  });
+  const headers = await signedPostHeaders(host, target, body);
+  const resp = await fetch(`https://${host}/`, { method: 'POST', headers, body });
+  if (!resp.ok) throw new Error(`DynamoDB DeleteItem failed (${resp.status}): ${await resp.text()}`);
+}
+
+// Convert a DynamoDB item ({ "name": { "S": "Foo" }, "power": { "BOOL": true } })
+// to a plain JS object ({ "name": "Foo", "power": true })
+function dynamoToPlain(item) {
+  const out = {};
+  for (const k of Object.keys(item)) {
+    const v = item[k];
+    if (v.S !== undefined) out[k] = v.S;
+    else if (v.N !== undefined) out[k] = Number(v.N);
+    else if (v.BOOL !== undefined) out[k] = v.BOOL;
+    else if (v.NULL !== undefined) out[k] = null;
+    else if (v.M !== undefined) {
+      const sub = {};
+      for (const sk of Object.keys(v.M)) sub[sk] = dynamoToPlain({ x: v.M[sk] }).x;
+      out[k] = sub;
+    }
+    else if (v.L !== undefined) out[k] = v.L.map(x => dynamoToPlain({ x }).x);
+    else out[k] = v;
+  }
+  return out;
+}
+
+// ============================================================
+// MQTT 3.1.1 wire protocol (unchanged from before)
 // ============================================================
 function concat(...arrays) {
   const total = arrays.reduce((s, a) => s + a.length, 0);
@@ -126,30 +226,24 @@ function decStr(data, off) {
   return { str: new TextDecoder().decode(data.subarray(off + 2, off + 2 + len)), bytesRead: 2 + len };
 }
 
-// MQTT 5 CONNECT: protocol level 0x05, plus a properties length byte after keepalive (0 = no properties).
-// Per-packet, MQTT 5 also requires a properties length byte after the variable header before the payload.
+// MQTT 5.0 packet builders (we proved AWS IoT requires 5.0 on the WSS endpoint)
 function packCONNECT(clientId) {
   const varHdr = concat(
     encStr('MQTT'),
     new Uint8Array([0x05, 0x02, (KEEPALIVE_SEC >> 8) & 0xff, KEEPALIVE_SEC & 0xff, 0x00]),
   );
-  // Payload: properties length not in payload; only the client ID here (no will, no auth)
   const payload = encStr(clientId);
   const remaining = varHdr.length + payload.length;
   return concat(new Uint8Array([0x10]), encVarLen(remaining), varHdr, payload);
 }
-
-// MQTT 5 SUBSCRIBE: variable header = packet ID + properties length (0). Payload = topic + sub options (0).
 function packSUBSCRIBE(packetId, topic) {
   const pid = new Uint8Array([(packetId >> 8) & 0xff, packetId & 0xff]);
-  const props = new Uint8Array([0x00]);                          // properties length 0
-  const subOpts = new Uint8Array([0x00]);                        // QoS 0, no retain
+  const props = new Uint8Array([0x00]);
+  const subOpts = new Uint8Array([0x00]);
   const payload = concat(encStr(topic), subOpts);
   const remaining = pid.length + props.length + payload.length;
   return concat(new Uint8Array([0x82]), encVarLen(remaining), pid, props, payload);
 }
-
-// MQTT 5 PUBLISH (QoS 0): variable header = topic + properties length (0). Then payload bytes.
 function packPUBLISH(topic, body) {
   const topicBytes = encStr(topic);
   const props = new Uint8Array([0x00]);
@@ -157,13 +251,9 @@ function packPUBLISH(topic, body) {
   const remaining = topicBytes.length + props.length + payloadBytes.length;
   return concat(new Uint8Array([0x30]), encVarLen(remaining), topicBytes, props, payloadBytes);
 }
-
 const PINGREQ    = new Uint8Array([0xC0, 0x00]);
 const DISCONNECT = new Uint8Array([0xE0, 0x00]);
 
-// ============================================================
-// MQTT client API
-// ============================================================
 let socket = null;
 const handlers = new Map();
 let pingTimer = null;
@@ -179,12 +269,10 @@ function topicMatches(pattern, topic) {
   }
   return pp.length === tp.length;
 }
-
 function handleIncomingPacket(packetType, body) {
-  if (packetType === 0x30) {  // PUBLISH (QoS 0)
+  if (packetType === 0x30) {
     const ts = decStr(body, 0);
     let off = ts.bytesRead;
-    // MQTT 5 PUBLISH has a properties length next
     const props = decVarLen(body, off);
     if (props) off += props.bytesRead + props.length;
     const payload = new TextDecoder().decode(body.subarray(off));
@@ -194,19 +282,15 @@ function handleIncomingPacket(packetType, body) {
       if (topicMatches(pattern, ts.str)) handler(ts.str, json ?? payload);
     }
   }
-  // SUBACK (0x90), PINGRESP (0xD0), DISCONNECT (0xE0) — ignored
 }
 
 export async function mqttConnect() {
   const url = await signIotWebSocketUrl();
   const clientId = 'web-' + Math.random().toString(36).slice(2, 10);
-
   return new Promise((resolve, reject) => {
     socket = new WebSocket(url, ['mqtt']);
     socket.binaryType = 'arraybuffer';
-
     socket.onopen = () => socket.send(packCONNECT(clientId));
-
     socket.onmessage = (ev) => {
       recvBuffer = concat(recvBuffer, new Uint8Array(ev.data));
       while (recvBuffer.length >= 2) {
@@ -216,9 +300,7 @@ export async function mqttConnect() {
         const total = 1 + lenInfo.bytesRead + lenInfo.length;
         if (recvBuffer.length < total) break;
         const body = recvBuffer.subarray(1 + lenInfo.bytesRead, total);
-
-        if (packetType === 0x20) {  // CONNACK
-          // MQTT 5 CONNACK: ack flags (1) + reason code (1) + properties...
+        if (packetType === 0x20) {
           const reasonCode = body[1];
           if (reasonCode === 0) {
             console.log('MQTT 5 connected');
@@ -226,32 +308,16 @@ export async function mqttConnect() {
               if (socket?.readyState === WebSocket.OPEN) socket.send(PINGREQ);
             }, (KEEPALIVE_SEC - 5) * 1000);
             resolve();
-          } else {
-            // Look for human-readable string in properties (often present)
-            const propsLen = decVarLen(body, 2);
-            let detail = '';
-            if (propsLen) {
-              const propsStart = 2 + propsLen.bytesRead;
-              const propsBytes = body.subarray(propsStart, propsStart + propsLen.length);
-              // crude scan for ASCII to surface AWS's error string
-              const ascii = [...propsBytes].map(b => b >= 32 && b < 127 ? String.fromCharCode(b) : '').join('').trim();
-              if (ascii) detail = ' — ' + ascii;
-            }
-            reject(new Error(`MQTT CONNACK reason=${reasonCode}${detail}`));
-          }
-        } else {
-          handleIncomingPacket(packetType, body);
-        }
+          } else reject(new Error(`MQTT CONNACK reason=${reasonCode}`));
+        } else handleIncomingPacket(packetType, body);
         recvBuffer = recvBuffer.subarray(total);
       }
     };
-
     socket.onerror = () => reject(new Error('WebSocket failed'));
     socket.onclose = (e) => {
       console.log('MQTT closed, code=', e.code);
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     };
-
     setTimeout(() => reject(new Error('MQTT connect timeout')), 15000);
   });
 }
@@ -261,13 +327,11 @@ export function mqttSubscribe(topic, handler) {
   handlers.set(topic, handler);
   socket.send(packSUBSCRIBE(nextPacketId++, topic));
 }
-
 export function mqttPublish(topic, payload) {
   if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('not connected');
   const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
   socket.send(packPUBLISH(topic, body));
 }
-
 export function mqttDisconnect() {
   if (socket?.readyState === WebSocket.OPEN) {
     try { socket.send(DISCONNECT); } catch {}
