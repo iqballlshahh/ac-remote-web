@@ -1,7 +1,10 @@
 import {
   signInWithGoogle, getIdentityId,
   mqttConnect, mqttSubscribe, mqttPublish, mqttDisconnect,
+  dynamoQuery, dynamoDelete,
 } from './aws-iot.js';
+
+const DEVICES_TABLE = 'ac-remote-devices';
 
 const cfg = window.APP_CONFIG;
 
@@ -120,11 +123,20 @@ async function onGoogleCredential(resp) {
     await mqttConnect();
     setupSubscriptions();
 
-    // AWS IoT pushes retained messages after SUBSCRIBE+SUBACK, but with a small
-    // delay. Wait briefly so existing devices populate before we show the list,
-    // otherwise the user sees "no devices yet" for a beat and may panic.
     setLoading('loading devices');
-    await new Promise(r => setTimeout(r, 1500));
+    try {
+      const items = await dynamoQuery(DEVICES_TABLE, 'user_id', userSub);
+      for (const item of items) {
+        devices.set(item.device_id, {
+          ...item,
+          online: !!item.online,
+          lastSeen: Number(item.updated_at) || Date.now(),
+        });
+      }
+    } catch (err) {
+      console.error('Failed to load devices from DynamoDB:', err);
+      toast('could not load devices: ' + err.message, 4000);
+    }
 
     show('screen-devices');
     refreshDeviceList();
@@ -466,11 +478,20 @@ document.getElementById('settings-save').onclick = (e) => {
   cmd('set_ac', { protocol });
   document.getElementById('settings-dialog').close();
 };
-document.getElementById('settings-reset').onclick = () => {
+document.getElementById('settings-reset').onclick = async () => {
   if (!confirm('factory reset — wipes WiFi, owner, and learned buttons. continue?')) return;
   cmd('factory_reset', {});
+  // Also remove from DynamoDB so it doesn't reappear in the device list.
+  try {
+    await dynamoDelete(DEVICES_TABLE, 'user_id', userSub, 'device_id', currentDevice);
+  } catch (err) {
+    console.error('Failed to delete device from DB:', err);
+  }
+  devices.delete(currentDevice);
   document.getElementById('settings-dialog').close();
-  toast('device will restart in pairing mode');
+  toast('device reset and removed');
+  show('screen-devices');
+  refreshDeviceList();
 };
 
 // ============================================================
