@@ -166,6 +166,63 @@ export async function dynamoDelete(tableName, partitionKeyName, partitionKeyValu
   if (!resp.ok) throw new Error(`DynamoDB DeleteItem failed (${resp.status}): ${await resp.text()}`);
 }
 
+// Put a full item. `item` is a plain JS object; we convert to DynamoDB attribute-value form.
+export async function dynamoPut(tableName, item) {
+  const host = `dynamodb.${cfg.AWS_REGION}.amazonaws.com`;
+  const target = 'DynamoDB_20120810.PutItem';
+  const body = JSON.stringify({ TableName: tableName, Item: plainToDynamo(item) });
+  const headers = await signedPostHeaders(host, target, body);
+  const resp = await fetch(`https://${host}/`, { method: 'POST', headers, body });
+  if (!resp.ok) throw new Error(`DynamoDB PutItem failed (${resp.status}): ${await resp.text()}`);
+}
+
+// Update specific attributes of an item. `updates` is `{ attrName: newValue, ... }`.
+export async function dynamoUpdate(tableName, partitionKeyName, partitionKeyValue, sortKeyName, sortKeyValue, updates) {
+  const host = `dynamodb.${cfg.AWS_REGION}.amazonaws.com`;
+  const target = 'DynamoDB_20120810.UpdateItem';
+  const names = {}, values = {}, sets = [];
+  let i = 0;
+  for (const [k, v] of Object.entries(updates)) {
+    const an = `#a${i}`, av = `:v${i}`;
+    names[an] = k;
+    values[av] = plainToDynamoValue(v);
+    sets.push(`${an} = ${av}`);
+    i++;
+  }
+  const body = JSON.stringify({
+    TableName: tableName,
+    Key: {
+      [partitionKeyName]: { S: partitionKeyValue },
+      [sortKeyName]: { S: sortKeyValue },
+    },
+    UpdateExpression: 'SET ' + sets.join(', '),
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
+  });
+  const headers = await signedPostHeaders(host, target, body);
+  const resp = await fetch(`https://${host}/`, { method: 'POST', headers, body });
+  if (!resp.ok) throw new Error(`DynamoDB UpdateItem failed (${resp.status}): ${await resp.text()}`);
+}
+
+function plainToDynamoValue(v) {
+  if (v === null || v === undefined) return { NULL: true };
+  if (typeof v === 'string')  return { S: v };
+  if (typeof v === 'number')  return { N: String(v) };
+  if (typeof v === 'boolean') return { BOOL: v };
+  if (Array.isArray(v))       return { L: v.map(plainToDynamoValue) };
+  if (typeof v === 'object') {
+    const m = {};
+    for (const [k, sub] of Object.entries(v)) m[k] = plainToDynamoValue(sub);
+    return { M: m };
+  }
+  return { S: String(v) };
+}
+function plainToDynamo(item) {
+  const out = {};
+  for (const [k, v] of Object.entries(item)) out[k] = plainToDynamoValue(v);
+  return out;
+}
+
 // Convert a DynamoDB item ({ "name": { "S": "Foo" }, "power": { "BOOL": true } })
 // to a plain JS object ({ "name": "Foo", "power": true })
 function dynamoToPlain(item) {
