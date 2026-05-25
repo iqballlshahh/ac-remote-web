@@ -4,18 +4,22 @@ import {
   dynamoQuery, dynamoPut, dynamoUpdate, dynamoDelete,
 } from './aws-iot.js';
 
+import { Floorplan } from './floorplan.js';
+
 const DEVICES_TABLE = 'ac-remote-devices';
 const ROOMS_TABLE   = 'ac-remote-rooms';
 
 const cfg = window.APP_CONFIG;
 
-// ---------- enums mirror IRremoteESP8266 ----------
+// ============================================================
+// DATA — enums mirror IRremoteESP8266
+// ============================================================
 const AC_MODES = [
-  { v: 1, label: 'Auto', key: 'auto' },
-  { v: 2, label: 'Cool', key: 'cool' },
-  { v: 4, label: 'Dry',  key: 'dry'  },
-  { v: 5, label: 'Fan',  key: 'fan'  },
-  { v: 3, label: 'Heat', key: 'heat' },
+  { v: 1, key: 'auto', label: 'Auto', icon: '🔄' },
+  { v: 2, key: 'cool', label: 'Cool', icon: '❄️' },
+  { v: 4, key: 'dry',  label: 'Dry',  icon: '💧' },
+  { v: 5, key: 'fan',  label: 'Fan',  icon: '🌀' },
+  { v: 3, key: 'heat', label: 'Heat', icon: '🔥' },
 ];
 const AC_FANS = [
   { v: 0, label: 'Auto' },
@@ -37,29 +41,31 @@ const BRANDS = [
   { v: 55, name: 'Teco' },               { v: 57, name: 'TCL 112' },
   { v: 27, name: 'Argo' },               { v: 15, name: 'Coolix (generic)' },
 ];
-
 const APPLIANCE_ICONS = { ac: '❄️', fan: '🌀', generic: '🎛️' };
 
-// Predefined fan buttons (must match these names when learned)
 const FAN_BUTTONS = [
   { name: 'power',     label: 'Power',     icon: '⏻' },
   { name: 'speed_up',  label: 'Speed +',   icon: '＋' },
   { name: 'speed_dn',  label: 'Speed −',   icon: '−' },
-  { name: 'auto',      label: 'Auto mode', icon: '🔄' },
-  { name: 'osc_45',    label: 'Oscillate 45°',  icon: '↔' },
-  { name: 'osc_90',    label: 'Oscillate 90°',  icon: '↔↔' },
-  { name: 'osc_180',   label: 'Oscillate 180°', icon: '↔↔↔' },
+  { name: 'auto',      label: 'Auto',      icon: '🔄' },
+  { name: 'osc_45',    label: '45°',       icon: '↔' },
+  { name: 'osc_90',    label: '90°',       icon: '↔↔' },
+  { name: 'osc_180',   label: '180°',      icon: '↔↔↔' },
 ];
 
-// ---------- state ----------
+// ============================================================
+// STATE
+// ============================================================
 let user           = null;
 let userSub        = null;
-let rooms          = new Map();   // room_id -> { name, icon }
-let devices        = new Map();   // device_id -> full row
+let rooms          = new Map();   // room_id -> room object
+let devices        = new Map();   // device_id -> device object
 let currentRoomId  = null;
 let currentDevice  = null;
-let currentAppliance = null;      // appliance object inside currentDevice
-let currentButtons = [];          // learned button names for currentAppliance
+let currentAppliance = null;
+let currentButtons = [];
+let homeMode       = 'view';      // 'view' (3D) | 'edit' (2D)
+let floorplan      = null;
 
 // ============================================================
 // UTIL
@@ -79,10 +85,29 @@ function toast(msg, ms = 2200) {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => el.style.display = 'none', ms);
 }
-function uid() {
-  return Math.random().toString(36).slice(2, 10);
+function uid() { return Math.random().toString(36).slice(2, 10); }
+function escapeHTML(s) {
+  return String(s ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
-function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+// ============================================================
+// THEME
+// ============================================================
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('theme', theme);
+  if (floorplan) floorplan.setTheme(theme);
+}
+function initTheme() {
+  const saved = localStorage.getItem('theme');
+  const theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  applyTheme(theme);
+}
+function toggleTheme() {
+  const now = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  applyTheme(now);
+}
+initTheme();
 
 // ============================================================
 // LOGIN
@@ -91,7 +116,7 @@ window.addEventListener('load', () => {
   if (!window.google || !cfg.GOOGLE_CLIENT_ID || cfg.GOOGLE_CLIENT_ID.startsWith('REPLACE')) {
     document.querySelector('#screen-login p').textContent =
       'Edit config.js with your Google Client ID before deploying.';
-    return;
+    show('screen-login'); return;
   }
   google.accounts.id.initialize({
     client_id: cfg.GOOGLE_CLIENT_ID,
@@ -139,6 +164,8 @@ async function onGoogleCredential(resp) {
     setLoading('loading devices');
     await fetchDevices();
 
+    initFloorplan();
+    await autoPlaceOrphanRooms();
     show('screen-home');
     renderHome();
   } catch (err) {
@@ -157,9 +184,10 @@ document.getElementById('logout-btn').onclick = () => {
   google.accounts.id.disableAutoSelect();
   show('screen-login');
 };
+document.getElementById('theme-btn').onclick = toggleTheme;
 
 // ============================================================
-// DATA LOADING + MQTT SUBSCRIPTIONS
+// DATA
 // ============================================================
 async function fetchRooms() {
   try {
@@ -167,8 +195,7 @@ async function fetchRooms() {
     rooms.clear();
     for (const it of items) rooms.set(it.room_id, it);
   } catch (e) {
-    console.error('fetchRooms failed:', e);
-    toast('could not load rooms', 4000);
+    console.error('fetchRooms:', e); toast('could not load rooms', 4000);
   }
 }
 async function fetchDevices() {
@@ -176,11 +203,10 @@ async function fetchDevices() {
     const items = await dynamoQuery(DEVICES_TABLE, 'user_id', userSub);
     devices.clear();
     for (const it of items) {
-      // Migration: old-format rows have flat power/mode/degrees fields and no `appliances` array
+      // Migration: old-style rows without `appliances` array
       if (!Array.isArray(it.appliances)) {
         it.appliances = [{
-          id: 'default',
-          type: 'ac',
+          id: 'default', type: 'ac',
           name: it.name || 'AC',
           room_id: it.room_id || '',
           state: {
@@ -197,8 +223,7 @@ async function fetchDevices() {
       devices.set(it.device_id, it);
     }
   } catch (e) {
-    console.error('fetchDevices failed:', e);
-    toast('could not load devices', 4000);
+    console.error('fetchDevices:', e); toast('could not load devices', 4000);
   }
 }
 
@@ -207,14 +232,20 @@ function setupSubscriptions() {
     const id = topic.split('/')[4];
     const prev = devices.get(id) || {};
     devices.set(id, { ...prev, ...msg, online: !!msg.online, lastSeen: Date.now() });
-    // Re-render whatever screen is showing
-    if (document.getElementById('screen-home').style.display !== 'none')   renderHome();
-    if (document.getElementById('screen-room').style.display !== 'none')   renderRoom();
-    if (document.getElementById('screen-control').style.display !== 'none') renderControl();
+    rerender();
   });
   mqttSubscribe(`ac-remote/users/${userSub}/devices/+/event`, (topic, msg) => {
     handleEvent(topic.split('/')[4], msg);
   });
+}
+
+function rerender() {
+  const home   = document.getElementById('screen-home');
+  const room   = document.getElementById('screen-room');
+  const ctrl   = document.getElementById('screen-control');
+  if (home.style.display !== 'none')  renderHome();
+  if (room.style.display !== 'none')  renderRoom();
+  if (ctrl.style.display !== 'none')  renderControl();
 }
 
 function handleEvent(deviceId, ev) {
@@ -223,7 +254,6 @@ function handleEvent(deviceId, ev) {
     const r = ev.payload || {};
     if (r.success) {
       toast(`learned "${r.button}" (${r.edges} edges)`);
-      // refresh button list for currently open appliance
       if (currentDevice === deviceId && currentAppliance?.id === r.appliance_id) {
         cmd('list_buttons', { appliance_id: currentAppliance.id });
       }
@@ -243,7 +273,6 @@ function handleEvent(deviceId, ev) {
   }
 }
 
-// Helper to publish a cmd to the currently selected device
 function cmd(type, payload = {}) {
   if (!currentDevice) return;
   const topic = `ac-remote/users/${userSub}/devices/${currentDevice}/cmd`;
@@ -251,63 +280,221 @@ function cmd(type, payload = {}) {
 }
 
 // ============================================================
-// HOME SCREEN — rooms + unassigned devices
+// FLOORPLAN BOOTSTRAP + HOME RENDERING
 // ============================================================
-function renderHome() {
-  const grid = document.getElementById('rooms-grid');
-  const unassigned = document.getElementById('unassigned-list');
-  grid.innerHTML = '';
-  unassigned.innerHTML = '';
+function initFloorplan() {
+  if (floorplan) return;
+  floorplan = new Floorplan({
+    container3D: document.getElementById('floorplan-3d'),
+    container2D: document.getElementById('floorplan-2d'),
+    canvas3D:    document.getElementById('floorplan-3d-canvas'),
+    svg2D:       document.getElementById('floorplan-2d-svg'),
+    tooltip3D:   ensureTooltip3D(),
+    getRooms:    () => rooms,
+    getDeviceCountForRoom: countAppliancesInRoom,
+    isRoomActive: (rid) => {
+      for (const d of devices.values())
+        for (const a of (d.appliances || []))
+          if ((a.room_id || d.room_id) === rid && a.state?.power) return true;
+      return false;
+    },
+    onRoomTap:    (rid) => openRoom(rid),
+    onRoomEdit:   (rid) => openRoomDialog(rid),
+    onLayoutChange: () => persistDirtyLayouts(),
+  });
+  floorplan.setTheme(document.documentElement.getAttribute('data-theme'));
+}
 
-  // Sort rooms by name
-  const rs = [...rooms.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  for (const r of rs) {
-    const count = countAppliancesInRoom(r.room_id);
-    const card = document.createElement('div');
-    card.className = 'room-card';
-    card.innerHTML = `
-      <div class="room-icon">${r.icon || '🚪'}</div>
-      <div class="room-name">${escapeHTML(r.name)}</div>
-      <div class="room-count">${count} appliance${count === 1 ? '' : 's'}</div>
-    `;
-    card.onclick = () => openRoom(r.room_id);
-    grid.appendChild(card);
-  }
+function ensureTooltip3D() {
+  let t = document.querySelector('.fp-room-tooltip');
+  if (t) return t;
+  t = document.createElement('div');
+  t.className = 'fp-room-tooltip';
+  t.style.opacity = '0';
+  document.getElementById('floorplan-3d').appendChild(t);
+  return t;
+}
 
-  // "+ add room" card at the end
-  const add = document.createElement('div');
-  add.className = 'add-room-card';
-  add.textContent = '+';
-  add.onclick = () => openRoomDialog(null);
-  grid.appendChild(add);
-
-  // Devices/appliances not assigned to any room (i.e. room_id empty or pointing at deleted room)
-  const orphans = [];
-  for (const d of devices.values()) {
-    for (const a of d.appliances || []) {
-      const rid = a.room_id || d.room_id || '';
-      if (!rid || !rooms.has(rid)) orphans.push({ device: d, appliance: a });
+// Rooms created before the floor-plan feature have no `floor_plan` attribute.
+// Auto-place them so they appear in 3D immediately, then persist.
+async function autoPlaceOrphanRooms() {
+  if (!floorplan) return;
+  for (const r of rooms.values()) {
+    if (!r.floor_plan) {
+      r.floor_plan = floorplan.autoPlace();
+      try {
+        await dynamoPut(ROOMS_TABLE, {
+          user_id: userSub, room_id: r.room_id,
+          name: r.name, icon: r.icon,
+          floor_plan: r.floor_plan,
+        });
+      } catch (err) {
+        console.error('auto-place failed for', r.room_id, err);
+      }
     }
   }
-  if (orphans.length === 0) {
-    unassigned.innerHTML = '<p class="dim center small">all appliances are assigned to rooms.</p>';
-  } else {
-    for (const { device, appliance } of orphans) {
-      unassigned.appendChild(applianceTile(device, appliance));
-    }
-  }
+  floorplan.refresh();
 }
 
 function countAppliancesInRoom(roomId) {
   let n = 0;
   for (const d of devices.values())
-    for (const a of d.appliances || [])
+    for (const a of (d.appliances || []))
       if ((a.room_id || d.room_id) === roomId) n++;
   return n;
 }
-function escapeHTML(s) {
-  return String(s ?? '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+
+// Persist any layout edits (drag/resize) to DynamoDB
+async function persistDirtyLayouts() {
+  const dirty = floorplan.getDirtyRooms();
+  for (const { roomId, floor_plan } of dirty) {
+    const r = rooms.get(roomId);
+    if (!r) continue;
+    r.floor_plan = floor_plan;
+    try {
+      await dynamoPut(ROOMS_TABLE, {
+        user_id: userSub, room_id: roomId,
+        name: r.name, icon: r.icon,
+        floor_plan,
+      });
+    } catch (err) {
+      console.error('persist room failed', err);
+    }
+  }
+  floorplan.clearDirty();
 }
+
+function renderHome() {
+  // Render unassigned appliances list
+  const unassigned = document.getElementById('unassigned-list');
+  unassigned.innerHTML = '';
+  let orphans = [];
+  for (const d of devices.values())
+    for (const a of (d.appliances || [])) {
+      const rid = a.room_id || d.room_id || '';
+      if (!rid || !rooms.has(rid)) orphans.push({ device: d, appliance: a });
+    }
+  const hasDevices = devices.size > 0;
+  if (orphans.length === 0) {
+    unassigned.innerHTML = hasDevices
+      ? `<p class="dim small">All appliances are assigned to rooms. Tap a room above to control them.</p>`
+      : `<p class="dim small">No appliances yet. Tap <strong>+ add device</strong> to pair your first one.</p>`;
+  } else {
+    for (const { device, appliance } of orphans) unassigned.appendChild(applianceTile(device, appliance));
+  }
+
+  if (floorplan) {
+    floorplan.setMode(homeMode);
+  }
+}
+
+// Home mode toggle (3D / 2D)
+document.querySelectorAll('.home-mode-toggle button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.home-mode-toggle button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    homeMode = btn.dataset.homeMode;
+    if (floorplan) floorplan.setMode(homeMode);
+  };
+});
+
+// 2D-editor toolbar
+document.getElementById('add-room-2d').onclick = async () => {
+  // Quick-create: ask name in a dialog, then drop on floor plan
+  editingRoomId = null;
+  document.getElementById('room-dialog-title').textContent = 'Add a room';
+  document.getElementById('room-delete').style.display = 'none';
+  document.getElementById('room-name-input').value = '';
+  document.querySelectorAll('#room-icon-picker button').forEach((b, i) => {
+    b.classList.toggle('selected', b.dataset.icon === '🚪');
+    b.onclick = (e) => {
+      e.preventDefault();
+      document.querySelectorAll('#room-icon-picker button').forEach(x => x.classList.remove('selected'));
+      b.classList.add('selected');
+    };
+  });
+  document.getElementById('room-dialog').showModal();
+};
+document.getElementById('edit-selected-room').onclick = () => {
+  if (!floorplan.getSelectedRoomId()) return;
+  openRoomDialog(floorplan.getSelectedRoomId());
+};
+document.getElementById('delete-selected-room').onclick = async () => {
+  const rid = floorplan.getSelectedRoomId();
+  if (!rid) return;
+  if (!confirm('Delete this room? Appliances in it will become unassigned.')) return;
+  try {
+    await dynamoDelete(ROOMS_TABLE, 'user_id', userSub, 'room_id', rid);
+    rooms.delete(rid);
+    floorplan.clearSelection();
+    floorplan.refresh();
+    renderHome();
+  } catch (err) {
+    toast('delete failed: ' + err.message, 4000);
+  }
+};
+
+// ============================================================
+// ROOM DIALOG (add / edit)
+// ============================================================
+let editingRoomId = null;
+function openRoomDialog(roomId) {
+  editingRoomId = roomId;
+  const isEdit = !!roomId;
+  document.getElementById('room-dialog-title').textContent = isEdit ? 'Edit room' : 'Add a room';
+  document.getElementById('room-delete').style.display = isEdit ? '' : 'none';
+  const r = isEdit ? rooms.get(roomId) : { name: '', icon: '🚪' };
+  document.getElementById('room-name-input').value = r.name || '';
+  document.querySelectorAll('#room-icon-picker button').forEach(b => {
+    b.classList.toggle('selected', b.dataset.icon === (r.icon || '🚪'));
+    b.onclick = (e) => {
+      e.preventDefault();
+      document.querySelectorAll('#room-icon-picker button').forEach(x => x.classList.remove('selected'));
+      b.classList.add('selected');
+    };
+  });
+  document.getElementById('room-dialog').showModal();
+}
+document.getElementById('room-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('room-dialog').close(); };
+document.getElementById('room-save').onclick = async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('room-name-input').value.trim();
+  const icon = document.querySelector('#room-icon-picker button.selected')?.dataset.icon || '🚪';
+  if (!name) { toast('name the room'); return; }
+  const roomId = editingRoomId || uid();
+  const existing = rooms.get(roomId);
+  // Preserve floor_plan if editing, auto-place if new
+  let floor_plan = existing?.floor_plan;
+  if (!floor_plan) floor_plan = floorplan ? floorplan.autoPlace() : { x: 0, y: 0, width: 4, height: 3 };
+  const item = { user_id: userSub, room_id: roomId, name, icon, floor_plan };
+  try {
+    await dynamoPut(ROOMS_TABLE, item);
+    rooms.set(roomId, item);
+    document.getElementById('room-dialog').close();
+    if (currentRoomId === roomId) {
+      document.getElementById('room-name').textContent = `${icon} ${name}`;
+    }
+    if (floorplan) floorplan.refresh();
+    renderHome();
+  } catch (err) {
+    toast('save failed: ' + err.message, 4000);
+  }
+};
+document.getElementById('room-delete').onclick = async (e) => {
+  e.preventDefault();
+  if (!editingRoomId) return;
+  if (!confirm('Delete this room? Appliances in it will become unassigned.')) return;
+  try {
+    await dynamoDelete(ROOMS_TABLE, 'user_id', userSub, 'room_id', editingRoomId);
+    rooms.delete(editingRoomId);
+    document.getElementById('room-dialog').close();
+    if (currentRoomId === editingRoomId) { currentRoomId = null; show('screen-home'); }
+    if (floorplan) { floorplan.clearSelection(); floorplan.refresh(); }
+    renderHome();
+  } catch (err) {
+    toast('delete failed: ' + err.message, 4000);
+  }
+};
 
 // ============================================================
 // ROOM SCREEN
@@ -325,14 +512,12 @@ function renderRoom() {
   const empty     = document.getElementById('room-empty');
   container.innerHTML = '';
   let count = 0;
-  for (const d of devices.values()) {
-    for (const a of d.appliances || []) {
+  for (const d of devices.values())
+    for (const a of (d.appliances || []))
       if ((a.room_id || d.room_id) === currentRoomId) {
         container.appendChild(applianceTile(d, a));
         count++;
       }
-    }
-  }
   empty.style.display = count === 0 ? '' : 'none';
 }
 document.getElementById('room-back-btn').onclick = () => { currentRoomId = null; show('screen-home'); renderHome(); };
@@ -341,19 +526,18 @@ document.getElementById('room-edit-btn').onclick = () => openRoomDialog(currentR
 function applianceTile(device, appliance) {
   const el = document.createElement('div');
   el.className = 'appliance-tile';
-  const isAC = appliance.type === 'ac';
   const state = appliance.state || {};
   const isOn = state.power === true;
   if (isOn) el.classList.add('power-on');
-  let summary = '';
-  if (isAC) {
+  let summary = 'off';
+  if (appliance.type === 'ac') {
     summary = isOn
-      ? `${(AC_MODES.find(m => m.v === state.mode) || {}).label || ''} · ${state.degrees || '?'}°C`
+      ? `${(AC_MODES.find(m => m.v === state.mode) || {}).label || ''} · ${state.degrees || '?'}°`
       : 'off';
   } else if (appliance.type === 'fan') {
-    summary = 'fan controls';
+    summary = 'fan';
   } else {
-    summary = 'custom buttons';
+    summary = 'remote';
   }
   el.innerHTML = `
     <div class="ap-icon">${APPLIANCE_ICONS[appliance.type] || '🎛️'}</div>
@@ -368,17 +552,16 @@ function applianceTile(device, appliance) {
 }
 
 // ============================================================
-// CONTROL SCREEN (renders different layout per appliance type)
+// CONTROL SCREEN
 // ============================================================
 function openControl(deviceId, applianceId) {
   currentDevice = deviceId;
   const d = devices.get(deviceId);
   currentAppliance = (d.appliances || []).find(a => a.id === applianceId);
   if (!currentAppliance) return;
-  document.getElementById('control-title').textContent = `${APPLIANCE_ICONS[currentAppliance.type] || ''} ${currentAppliance.name}`;
+  document.getElementById('control-title').textContent = currentAppliance.name;
   show('screen-control');
   renderControl();
-  // Request the learned-button list for fan/generic
   if (currentAppliance.type !== 'ac') cmd('list_buttons', { appliance_id: currentAppliance.id });
 }
 document.getElementById('control-back-btn').onclick = () => {
@@ -390,7 +573,6 @@ document.getElementById('control-settings-btn').onclick = () => openSettings();
 
 function renderControl() {
   if (!currentAppliance) return;
-  // refresh from devices Map (state may have changed via MQTT)
   const d = devices.get(currentDevice);
   currentAppliance = (d.appliances || []).find(a => a.id === currentAppliance.id) || currentAppliance;
   const body = document.getElementById('control-body');
@@ -400,37 +582,63 @@ function renderControl() {
   else                                       renderGenericControl(body);
 }
 
-// ---- AC ----
+// ---- AC remote ----
 function renderAcControl(root) {
   const st = currentAppliance.state || {};
   const power = !!st.power;
-  const temp = st.degrees ?? 24;
-  const mode = st.mode ?? 1;
-  const fan  = st.fanspeed ?? 0;
+  const temp = Math.round(st.degrees ?? 24);
+  const modeV = st.mode ?? 1;
+  const fan = st.fanspeed ?? 0;
+  const modeObj = AC_MODES.find(m => m.v === modeV) || AC_MODES[0];
+
+  // Ring math — temp 16..30 maps to a 270° arc
+  const minT = 16, maxT = 30;
+  const pct = Math.max(0, Math.min(1, (temp - minT) / (maxT - minT)));
+  const circ = 2 * Math.PI * 90;
+  const arcMax = 0.75 * circ;        // 270 deg in stroke length
+  const dashFill = pct * arcMax;
+  const dashEmpty = circ - dashFill;
 
   root.innerHTML = `
-    <div class="fan-power-tile">
-      <div class="power-state">${power ? 'ON' : 'OFF'} · ${temp}°C</div>
-      <button class="power-toggle ${power ? 'on' : ''}" id="ac-power">${power ? 'turn off' : 'turn on'}</button>
-    </div>
-    <div class="fan-row">
-      <div class="row-label">Temp</div>
-      <div class="row-buttons">
-        <button id="t-dn">−</button>
-        <span style="padding:0 10px;font-weight:600">${temp}°C</span>
-        <button id="t-up">+</button>
+    <div class="ac-stage">
+      <div class="ac-hero ${power ? `on ${modeObj.key}` : ''}">
+        <div class="ac-mode-label">${escapeHTML(modeObj.label)} mode</div>
+        <div class="ac-status">${power ? 'cooling' : 'standby'}</div>
+        <div class="ac-temp-ring">
+          <svg viewBox="0 0 220 220">
+            <circle class="ring-bg" cx="110" cy="110" r="90"
+                    stroke-dasharray="${arcMax} ${circ - arcMax}"
+                    stroke-dashoffset="${circ * 0.125}"></circle>
+            <circle class="ring-fg" cx="110" cy="110" r="90"
+                    stroke-dasharray="${dashFill} ${circ}"
+                    stroke-dashoffset="${circ * 0.125}"></circle>
+          </svg>
+          <div class="ring-readout">
+            <div class="ring-temp">${temp}<sup>°C</sup></div>
+            <div class="ring-mode">${modeObj.icon} ${escapeHTML(modeObj.label)}</div>
+          </div>
+        </div>
+        <div class="ac-temp-arrows">
+          <button id="t-dn" aria-label="cooler">−</button>
+          <button id="t-up" aria-label="warmer">＋</button>
+        </div>
+        <button class="ac-power-btn" id="ac-power">${power ? 'turn off' : 'turn on'}</button>
       </div>
-    </div>
-    <div class="fan-row">
-      <div class="row-label">Mode</div>
-      <div class="row-buttons">
-        ${AC_MODES.map(m => `<button class="${m.v===mode?'active':''}" data-mode="${m.v}">${m.label}</button>`).join('')}
-      </div>
-    </div>
-    <div class="fan-row">
-      <div class="row-label">Fan</div>
-      <div class="row-buttons">
-        ${AC_FANS.map(f => `<button class="${f.v===fan?'active':''}" data-fan="${f.v}">${f.label}</button>`).join('')}
+      <div class="ac-controls">
+        <div class="ac-row">
+          <div class="row-label">Mode</div>
+          <div class="pill-group">
+            ${AC_MODES.map(m => `
+              <button data-mode-key="${m.key}" data-mode="${m.v}" class="${m.v===modeV?'active':''}">${m.icon} ${m.label}</button>
+            `).join('')}
+          </div>
+        </div>
+        <div class="ac-row">
+          <div class="row-label">Fan speed</div>
+          <div class="pill-group">
+            ${AC_FANS.map(f => `<button data-fan="${f.v}" class="${f.v===fan?'active':''}">${f.label}</button>`).join('')}
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -441,9 +649,7 @@ function renderAcControl(root) {
   root.querySelectorAll('[data-fan]').forEach(b  => b.onclick = () => setAc({ fanspeed: Number(b.dataset.fan) }));
 }
 function setAc(changes) {
-  // Optimistic local update
   Object.assign(currentAppliance.state, changes);
-  // Always send protocol + power so device has full picture
   cmd('set_ac', {
     appliance_id: currentAppliance.id,
     protocol: currentAppliance.state.protocol,
@@ -457,57 +663,76 @@ function setAc(changes) {
   renderControl();
 }
 
-// ---- FAN ----
+// ---- Fan remote ----
 function renderFanControl(root) {
   const learned = new Set(currentButtons);
-  const tiles = FAN_BUTTONS.map(b => {
-    const isLearned = learned.has(b.name);
-    return `<div class="custom-btn" data-fan-btn="${b.name}" style="${isLearned ? '' : 'opacity:.5'}">
-      <div class="btn-icon">${b.icon}</div>${escapeHTML(b.label)}
-      <div class="dim small" style="margin-top:4px">${isLearned ? '' : '(not learned)'}</div>
-    </div>`;
-  }).join('');
+  const isPowerOn = false; // we don't actually know fan power state — display as ambiguous
+  const mainButtons = FAN_BUTTONS.slice(0, 4); // power, speed +/-, auto
+  const oscButtons  = FAN_BUTTONS.slice(4);    // 45, 90, 180
   root.innerHTML = `
-    <p class="dim small" style="padding:0 4px">
-      Tap a button to send. To teach the fan a new command, open settings →
-      learn button — name it exactly one of: ${FAN_BUTTONS.map(b => `<code>${b.name}</code>`).join(', ')}.
-    </p>
-    <div class="custom-buttons">
-      ${tiles}
-      <div class="add-button-tile" id="fan-learn-btn">+ learn button</div>
+    <div class="fan-stage">
+      <div class="fan-hero ${isPowerOn ? 'on' : ''}">
+        <div class="ac-mode-label">${escapeHTML(currentAppliance.name)}</div>
+        <div class="fan-rotor">🌀</div>
+        <p class="dim small">Tap a button to send the learned IR code.</p>
+      </div>
+      <div class="fan-buttons">
+        ${mainButtons.map(b => `
+          <div class="fan-btn ${learned.has(b.name) ? '' : 'locked'}" data-fan-btn="${b.name}">
+            <div class="fb-icon">${b.icon}</div>
+            <div class="fb-label">${b.label}</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="ac-row" style="margin-top:14px">
+        <div class="row-label">Oscillation</div>
+        <div class="fan-osc">
+          ${oscButtons.map(b => `
+            <div class="fan-btn ${learned.has(b.name) ? '' : 'locked'}" data-fan-btn="${b.name}">
+              <div class="fb-icon">${b.icon}</div>
+              <div class="fb-label">${b.label}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div class="generic-grid" style="margin-top:14px">
+        <div class="add-button-tile" id="fan-learn-btn">+ learn a button</div>
+      </div>
     </div>
   `;
   root.querySelectorAll('[data-fan-btn]').forEach(el => {
     el.onclick = () => {
       const name = el.dataset.fanBtn;
-      if (!learned.has(name)) { toast(`"${name}" not learned yet — see settings`, 3000); return; }
+      if (!learned.has(name)) { toast(`"${name}" not learned yet — tap "learn a button" below`, 3500); return; }
       cmd('send_raw', { appliance_id: currentAppliance.id, button: name });
     };
   });
   document.getElementById('fan-learn-btn').onclick = () => openLearnDialog();
 }
 
-// ---- GENERIC ----
+// ---- Generic remote ----
 function renderGenericControl(root) {
   if (currentButtons.length === 0) {
     root.innerHTML = `
-      <p class="dim center">no buttons learned yet. tap below to teach this device its first button.</p>
-      <div class="custom-buttons">
-        <div class="add-button-tile" id="gen-learn-btn">+ learn button</div>
+      <p class="dim center" style="padding:30px 20px">No buttons learned yet.<br>Tap below to teach this remote its first button.</p>
+      <div class="generic-grid">
+        <div class="add-button-tile" id="gen-learn-btn">+ learn a button</div>
       </div>
     `;
     document.getElementById('gen-learn-btn').onclick = () => openLearnDialog();
     return;
   }
-  const tiles = currentButtons.map(n =>
-    `<div class="custom-btn" data-gen-btn="${escapeHTML(n)}">
-       <div class="btn-icon">🔘</div>${escapeHTML(n)}
-     </div>`
-  ).join('');
+  const tiles = currentButtons.map(n => `
+    <div class="generic-btn" data-gen-btn="${escapeHTML(n)}">
+      <div class="gb-icon">🔘</div>
+      <div class="gb-label">${escapeHTML(n)}</div>
+    </div>
+  `).join('');
   root.innerHTML = `
-    <div class="custom-buttons">
+    <p class="dim small" style="margin-bottom:8px">Tap to send. Right-click to delete.</p>
+    <div class="generic-grid">
       ${tiles}
-      <div class="add-button-tile" id="gen-learn-btn">+ learn button</div>
+      <div class="add-button-tile" id="gen-learn-btn">+ learn a button</div>
     </div>
   `;
   root.querySelectorAll('[data-gen-btn]').forEach(el => {
@@ -537,64 +762,7 @@ document.getElementById('learn-start').onclick  = (e) => {
   cmd('learn', { appliance_id: currentAppliance.id, button: name });
   const s = document.getElementById('learn-status');
   s.style.display = '';
-  s.textContent = 'waiting for IR signal — aim your remote at the receiver and press the button within 12 seconds…';
-};
-
-// ============================================================
-// ROOM DIALOG (add / edit)
-// ============================================================
-let editingRoomId = null;
-function openRoomDialog(roomId) {
-  editingRoomId = roomId;
-  const isEdit = !!roomId;
-  document.getElementById('room-dialog-title').textContent = isEdit ? 'Edit room' : 'Add a room';
-  document.getElementById('room-delete').style.display = isEdit ? '' : 'none';
-  const r = isEdit ? rooms.get(roomId) : { name: '', icon: '🚪' };
-  document.getElementById('room-name-input').value = r.name || '';
-  document.querySelectorAll('#room-icon-picker button').forEach(b => {
-    b.classList.toggle('selected', b.dataset.icon === (r.icon || '🚪'));
-    b.onclick = (e) => {
-      e.preventDefault();
-      document.querySelectorAll('#room-icon-picker button').forEach(x => x.classList.remove('selected'));
-      b.classList.add('selected');
-    };
-  });
-  document.getElementById('room-dialog').showModal();
-}
-document.getElementById('add-room-btn').onclick = () => openRoomDialog(null);
-document.getElementById('room-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('room-dialog').close(); };
-document.getElementById('room-save').onclick = async (e) => {
-  e.preventDefault();
-  const name = document.getElementById('room-name-input').value.trim();
-  const icon = document.querySelector('#room-icon-picker button.selected')?.dataset.icon || '🚪';
-  if (!name) { toast('name the room'); return; }
-  const roomId = editingRoomId || uid();
-  const item = { user_id: userSub, room_id: roomId, name, icon };
-  try {
-    await dynamoPut(ROOMS_TABLE, item);
-    rooms.set(roomId, item);
-    document.getElementById('room-dialog').close();
-    if (document.getElementById('screen-room').style.display !== 'none' && currentRoomId === roomId) {
-      document.getElementById('room-name').textContent = `${icon} ${name}`;
-    }
-    renderHome();
-  } catch (err) {
-    toast('save failed: ' + err.message, 4000);
-  }
-};
-document.getElementById('room-delete').onclick = async (e) => {
-  e.preventDefault();
-  if (!editingRoomId) return;
-  if (!confirm('delete this room? appliances in this room will become unassigned.')) return;
-  try {
-    await dynamoDelete(ROOMS_TABLE, 'user_id', userSub, 'room_id', editingRoomId);
-    rooms.delete(editingRoomId);
-    document.getElementById('room-dialog').close();
-    if (currentRoomId === editingRoomId) { currentRoomId = null; show('screen-home'); }
-    renderHome();
-  } catch (err) {
-    toast('delete failed: ' + err.message, 4000);
-  }
+  s.textContent = 'waiting for IR signal — aim your remote at the receiver and press the button within 12s…';
 };
 
 // ============================================================
@@ -610,10 +778,8 @@ document.getElementById('add-device-btn').onclick = () => {
   document.getElementById('pair-pass').value = '';
   document.getElementById('pair-appliance-name').value = '';
   document.getElementById('add-progress').style.display = 'none';
-
-  // Populate room selector
   const sel = document.getElementById('pair-room');
-  sel.innerHTML = '<option value="">(no room)</option>';
+  sel.innerHTML = '<option value="">(unassigned)</option>';
   for (const r of rooms.values()) {
     const opt = document.createElement('option');
     opt.value = r.room_id; opt.textContent = `${r.icon || '🚪'} ${r.name}`;
@@ -630,25 +796,21 @@ document.getElementById('add-submit').onclick = async (e) => {
   const roomId = document.getElementById('pair-room').value || '';
   const apType = document.getElementById('pair-appliance-type').value;
   const apName = document.getElementById('pair-appliance-name').value.trim() || ({ ac: 'AC', fan: 'Fan', generic: 'Remote' }[apType] || 'Appliance');
-
-  if (!name || !ssid) { toast('fill in name and WiFi SSID'); return; }
+  if (!name || !ssid) { toast('fill in device name and WiFi SSID'); return; }
   if (!navigator.bluetooth) { toast('Web Bluetooth not supported in this browser', 4000); return; }
 
-  const progress     = document.getElementById('add-progress');
-  const progressMsg  = document.getElementById('add-progress-msg');
+  const progress = document.getElementById('add-progress');
+  const progressMsg = document.getElementById('add-progress-msg');
   progress.style.display = 'block';
   progressMsg.textContent = 'asking your browser to pick a device…';
 
   try {
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [BLE_SERVICE_UUID] }],
-    });
+    const device = await navigator.bluetooth.requestDevice({ filters: [{ services: [BLE_SERVICE_UUID] }] });
     progressMsg.textContent = `connecting to ${device.name}…`;
     const server = await device.gatt.connect();
     const service = await server.getPrimaryService(BLE_SERVICE_UUID);
     const cfgChar = await service.getCharacteristic(BLE_CHAR_CONFIG_UUID);
     const statusChar = await service.getCharacteristic(BLE_CHAR_STATUS_UUID);
-
     await statusChar.startNotifications();
     statusChar.addEventListener('characteristicvaluechanged', (ev) => {
       const s = new TextDecoder().decode(ev.target.value);
@@ -657,18 +819,16 @@ document.getElementById('add-submit').onclick = async (e) => {
         setTimeout(() => {
           document.getElementById('add-dialog').close();
           toast('device paired!');
-          fetchDevices().then(renderHome);
+          fetchDevices().then(() => { renderHome(); if (floorplan) floorplan.refresh(); });
         }, 1500);
       }
     });
-
     progressMsg.textContent = 'sending config to device…';
     const config = {
       ssid, pass, name, user_id: userSub, room_id: roomId,
       appliances: [{ id: 'default', type: apType, name: apName, room_id: roomId }],
     };
-    const payload = new TextEncoder().encode(JSON.stringify(config));
-    await cfgChar.writeValue(payload);
+    await cfgChar.writeValue(new TextEncoder().encode(JSON.stringify(config)));
     progressMsg.textContent = 'config sent. device is connecting…';
   } catch (err) {
     progressMsg.textContent = 'pairing failed: ' + err.message;
@@ -682,7 +842,7 @@ function humanizeStatus(s) {
     connecting_mqtt:       'device connecting to the cloud…',
     connected:             '✓ paired! device is online.',
     error_wifi:            '✗ WiFi connection failed. wrong SSID or password?',
-    error_mqtt:            '✗ cloud connection failed. check if you ran the attach-policy step.',
+    error_mqtt:            '✗ cloud connection failed. did you attach the IoT policy to this identity?',
     error_invalid_json:    '✗ internal error sending config.',
     error_missing_fields:  '✗ internal error sending config.',
   })[s] || s;
@@ -693,9 +853,8 @@ function humanizeStatus(s) {
 // ============================================================
 function openSettings() {
   document.getElementById('settings-name').value = currentAppliance.name;
-  // Room picker
   const sel = document.getElementById('settings-room');
-  sel.innerHTML = '<option value="">(no room)</option>';
+  sel.innerHTML = '<option value="">(unassigned)</option>';
   for (const r of rooms.values()) {
     const opt = document.createElement('option');
     opt.value = r.room_id; opt.textContent = `${r.icon || '🚪'} ${r.name}`;
@@ -720,17 +879,11 @@ document.getElementById('settings-save').onclick = (e) => {
   e.preventDefault();
   const newName = document.getElementById('settings-name').value.trim();
   const newRoom = document.getElementById('settings-room').value || '';
-  if (newName && newName !== currentAppliance.name) {
-    cmd('rename', { appliance_id: currentAppliance.id, name: newName });
-  }
-  if (newRoom !== (currentAppliance.room_id || '')) {
-    cmd('assign_room', { appliance_id: currentAppliance.id, room_id: newRoom });
-  }
+  if (newName && newName !== currentAppliance.name)         cmd('rename', { appliance_id: currentAppliance.id, name: newName });
+  if (newRoom !== (currentAppliance.room_id || ''))         cmd('assign_room', { appliance_id: currentAppliance.id, room_id: newRoom });
   if (currentAppliance.type === 'ac') {
     const newProto = Number(document.getElementById('settings-brand').value);
-    if (newProto !== currentAppliance.state.protocol) {
-      cmd('set_ac', { appliance_id: currentAppliance.id, protocol: newProto });
-    }
+    if (newProto !== currentAppliance.state.protocol)       cmd('set_ac', { appliance_id: currentAppliance.id, protocol: newProto });
   }
   document.getElementById('settings-dialog').close();
 };
@@ -739,18 +892,17 @@ document.getElementById('settings-delete').onclick = async (e) => {
   const d = devices.get(currentDevice);
   const isLast = (d.appliances || []).length <= 1;
   if (isLast) {
-    if (!confirm('this is the device\'s last appliance — factory-resetting the whole device. continue?')) return;
+    if (!confirm("This is the device's last appliance — factory-resetting the whole device. Continue?")) return;
     cmd('factory_reset', {});
     try { await dynamoDelete(DEVICES_TABLE, 'user_id', userSub, 'device_id', currentDevice); } catch {}
     devices.delete(currentDevice);
     toast('device reset and removed');
   } else {
-    if (!confirm(`remove appliance "${currentAppliance.name}" from this device?`)) return;
+    if (!confirm(`Remove appliance "${currentAppliance.name}" from this device?`)) return;
     cmd('delete_appliance', { id: currentAppliance.id });
     toast('appliance removed');
   }
   document.getElementById('settings-dialog').close();
   currentDevice = null; currentAppliance = null;
-  show('screen-home');
-  renderHome();
+  show('screen-home'); renderHome();
 };
