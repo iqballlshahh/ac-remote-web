@@ -182,6 +182,29 @@
   </div>
 </dialog>
 
+<!-- Add appliance to existing device -->
+<dialog id="add-appliance-dialog" class="dialog">
+  <h2>Add an appliance</h2>
+  <p class="dim small">
+    One ESP32 can drive multiple physical appliances at once. Just make sure
+    the new appliance has line-of-sight to the device's IR LED.
+  </p>
+  <label>Appliance type</label>
+  <select id="new-appliance-type">
+    <option value="ac">Air conditioner</option>
+    <option value="fan">Fan</option>
+    <option value="generic">Other (custom buttons)</option>
+  </select>
+  <label>Name</label>
+  <input id="new-appliance-name" type="text" placeholder="Ceiling Fan" maxlength="32" autocomplete="off">
+  <label>Room</label>
+  <select id="new-appliance-room"></select>
+  <div class="dialog-row">
+    <button class="ghost" id="new-appliance-cancel">cancel</button>
+    <button class="primary" id="new-appliance-save">add</button>
+  </div>
+</dialog>
+
 <!-- Appliance settings -->
 <dialog id="settings-dialog" class="dialog">
   <h2>Appliance settings</h2>
