@@ -1,37 +1,44 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>AC Remote</title>
 <link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Three.js via importmap (for the 3D dollhouse floor plan) -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 
-<!-- ============================================================ -->
-<!-- LOGIN SCREEN                                                  -->
-<!-- ============================================================ -->
+<!-- ================= LOGIN ================= -->
 <div id="screen-login" class="screen">
   <div class="login-card">
     <div class="logo">❄️</div>
     <h1>AC Remote</h1>
-    <p class="dim">Sign in to manage your home's appliances.</p>
+    <p>Sign in to manage your home's appliances.</p>
     <div id="google-btn-wrap"></div>
   </div>
 </div>
 
-<!-- ============================================================ -->
-<!-- LOADING SCREEN                                                -->
-<!-- ============================================================ -->
-<div id="screen-loading" class="screen" style="display:none">
+<!-- ================= LOADING ================= -->
+<div id="screen-loading" class="screen">
   <div class="spinner"></div>
   <div id="loading-msg" class="dim">loading…</div>
 </div>
 
-<!-- ============================================================ -->
-<!-- HOME SCREEN — rooms                                            -->
-<!-- ============================================================ -->
-<div id="screen-home" class="screen" style="display:none">
+<!-- ================= HOME (floor plan + unassigned) ================= -->
+<div id="screen-home" class="screen">
   <header class="top-bar">
     <div class="user-block">
       <img id="user-avatar" referrerpolicy="no-referrer">
@@ -40,60 +47,77 @@
         <div id="user-email" class="dim small"></div>
       </div>
     </div>
+    <button class="icon-btn" id="theme-btn"  title="toggle theme">🌓</button>
     <button class="icon-btn" id="logout-btn" title="sign out">⏻</button>
   </header>
 
   <main>
-    <div class="section-head">
-      <h2>Rooms</h2>
-      <button class="primary small" id="add-room-btn">+ add room</button>
+    <div class="home-mode-toggle">
+      <button class="active" data-home-mode="view">🏠 Home</button>
+      <button data-home-mode="edit">✎ Edit Layout</button>
     </div>
-    <div id="rooms-grid" class="rooms-grid"></div>
 
-    <div class="section-head" style="margin-top:30px">
-      <h2>Unassigned devices</h2>
+    <!-- 3D dollhouse view -->
+    <div class="floorplan-stage" id="floorplan-3d">
+      <canvas id="floorplan-3d-canvas"></canvas>
+      <div class="floorplan-empty" id="floorplan-3d-empty" style="display:none">
+        <div class="big-icon">🏠</div>
+        <p>Your home is empty.<br>Switch to <strong>Edit Layout</strong> to add your first room.</p>
+      </div>
+    </div>
+
+    <!-- 2D editor -->
+    <div class="floorplan-editor" id="floorplan-2d" style="display:none">
+      <svg id="floorplan-2d-svg" viewBox="0 0 800 540" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="editor-toolbar">
+        <div>
+          <button class="primary small" id="add-room-2d">＋ add room</button>
+          <button class="ghost small"   id="edit-selected-room" style="display:none">edit</button>
+          <button class="ghost small"   id="delete-selected-room" style="display:none">delete</button>
+        </div>
+        <div>
+          <span class="pill">drag rooms to position · drag corners to resize</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-head">
+      <h2>Unassigned appliances</h2>
       <button class="primary small" id="add-device-btn">+ add device</button>
     </div>
-    <div id="unassigned-list" class="device-list"></div>
+    <div id="unassigned-list" class="appliance-list"></div>
   </main>
 </div>
 
-<!-- ============================================================ -->
-<!-- ROOM SCREEN — appliances in a single room                      -->
-<!-- ============================================================ -->
-<div id="screen-room" class="screen" style="display:none">
+<!-- ================= ROOM (appliances in a single room) ================= -->
+<div id="screen-room" class="screen">
   <header class="top-bar">
     <button class="icon-btn" id="room-back-btn">←</button>
     <h2 id="room-name"></h2>
-    <button class="icon-btn" id="room-edit-btn" title="edit room">✎</button>
+    <button class="icon-btn" id="room-edit-btn"  title="edit room">✎</button>
   </header>
   <main>
     <div id="room-appliances" class="appliance-list"></div>
-    <p id="room-empty" class="dim center" style="display:none">
-      no appliances in this room yet.<br>
-      pair a device or assign an existing one.
+    <p id="room-empty" class="dim center" style="display:none; padding:40px 20px">
+      No appliances in this room yet.<br>
+      Pair a new device, or open an existing one and assign it here.
     </p>
   </main>
 </div>
 
-<!-- ============================================================ -->
-<!-- APPLIANCE CONTROL SCREEN                                      -->
-<!-- ============================================================ -->
-<div id="screen-control" class="screen" style="display:none">
+<!-- ================= APPLIANCE CONTROL ================= -->
+<div id="screen-control" class="screen">
   <header class="top-bar">
     <button class="icon-btn" id="control-back-btn">←</button>
     <h2 id="control-title"></h2>
     <button class="icon-btn" id="control-settings-btn" title="settings">⚙</button>
   </header>
   <main>
-    <!-- Dynamically populated based on appliance type -->
     <div id="control-body"></div>
   </main>
 </div>
 
-<!-- ============================================================ -->
-<!-- DIALOGS                                                        -->
-<!-- ============================================================ -->
+<!-- ================= DIALOGS ================= -->
 
 <!-- Add / edit room -->
 <dialog id="room-dialog" class="dialog">
@@ -119,21 +143,17 @@
   </div>
 </dialog>
 
-<!-- Add device -->
+<!-- Add device (BLE pairing) -->
 <dialog id="add-dialog" class="dialog">
   <h2>Add a device</h2>
-  <p class="dim">
-    Power on the new device and make sure it's nearby. Pairing uses Bluetooth
-    and takes about 30 seconds.
-    <br><br>
-    <strong>Chrome on Android, Mac, or Windows required.</strong>
-    iPhone Safari doesn't support Web Bluetooth.
+  <p class="dim small">
+    Power on the new device and make sure it's nearby. Chrome on Android, Mac, or Windows required — iPhone Safari doesn't support Web Bluetooth.
   </p>
 
-  <label>Device name (the controller, not the appliance)</label>
+  <label>Device name (the controller)</label>
   <input id="pair-name" type="text" placeholder="Living Room Hub" maxlength="32" autocomplete="off">
 
-  <label>Which room is this device in?</label>
+  <label>Which room?</label>
   <select id="pair-room"></select>
 
   <label>First appliance type</label>
@@ -143,10 +163,10 @@
     <option value="generic">Other (custom buttons only)</option>
   </select>
 
-  <label>First appliance name</label>
+  <label>Appliance name</label>
   <input id="pair-appliance-name" type="text" placeholder="AC" maxlength="32" autocomplete="off">
 
-  <label>Home WiFi network name (SSID)</label>
+  <label>Home WiFi (SSID)</label>
   <input id="pair-ssid" type="text" placeholder="MyHomeWiFi" autocomplete="off">
 
   <label>WiFi password</label>
@@ -162,26 +182,6 @@
   </div>
 </dialog>
 
-<!-- Add appliance to existing device -->
-<dialog id="add-appliance-dialog" class="dialog">
-  <h2>Add an appliance</h2>
-  <p class="dim">Add another appliance to this device. The device must have line-of-sight to all appliances it controls.</p>
-  <label>Type</label>
-  <select id="new-appliance-type">
-    <option value="ac">Air conditioner</option>
-    <option value="fan">Fan</option>
-    <option value="generic">Other (custom buttons only)</option>
-  </select>
-  <label>Name</label>
-  <input id="new-appliance-name" type="text" placeholder="Bedroom Fan" maxlength="32" autocomplete="off">
-  <label>Room (where the appliance physically lives)</label>
-  <select id="new-appliance-room"></select>
-  <div class="dialog-row">
-    <button class="ghost" id="new-appliance-cancel">cancel</button>
-    <button class="primary" id="new-appliance-save">add</button>
-  </div>
-</dialog>
-
 <!-- Appliance settings -->
 <dialog id="settings-dialog" class="dialog">
   <h2>Appliance settings</h2>
@@ -193,41 +193,40 @@
   <select id="settings-room"></select>
 
   <div id="settings-ac-section" style="display:none">
-    <label>Brand / protocol (for the Smart tab)</label>
+    <label>Brand / protocol</label>
     <select id="settings-brand"></select>
   </div>
 
-  <hr>
   <div class="dialog-row">
-    <button class="ghost" id="settings-cancel">cancel</button>
-    <button class="danger" id="settings-delete">remove</button>
+    <button class="ghost"   id="settings-cancel">cancel</button>
+    <button class="danger"  id="settings-delete">remove</button>
     <button class="primary" id="settings-save">save</button>
   </div>
 
-  <div style="margin-top:18px; border-top:1px solid var(--border); padding-top:12px">
-    <p class="dim small">Removing factory-resets the device or deletes just this appliance. If this is the device's last appliance, the whole device resets.</p>
-  </div>
+  <p class="dim small" style="margin-top:14px">
+    Removing factory-resets the device if this is its last appliance, or deletes just this appliance otherwise.
+  </p>
 </dialog>
 
 <!-- Learn button -->
 <dialog id="learn-dialog" class="dialog">
   <h2>Learn a button</h2>
-  <p class="dim" id="learn-instructions">Name the button, click start, then aim your real remote at the device's white sensor and press the button you want to capture.</p>
+  <p class="dim small">
+    Name the button, click start, then aim your real remote at the device's white sensor and press the button within 12 seconds.
+  </p>
   <label>Button name</label>
-  <input id="learn-name" type="text" placeholder="e.g. power, fan-high, oscillation-45" maxlength="20" autocomplete="off">
-  <div id="learn-status" class="dim" style="display:none"></div>
+  <input id="learn-name" type="text" placeholder="e.g. power, speed_up, osc_45" maxlength="20" autocomplete="off">
+  <div id="learn-status" class="dim" style="display:none; margin-top:12px"></div>
   <div class="dialog-row">
-    <button class="ghost" id="learn-cancel">cancel</button>
-    <button class="primary" id="learn-start">start</button>
+    <button class="ghost"   id="learn-cancel">cancel</button>
+    <button class="primary" id="learn-start">start capture</button>
   </div>
 </dialog>
 
 <!-- Toast -->
 <div id="toast" class="toast" style="display:none"></div>
 
-<!-- ============================================================ -->
-<!-- SCRIPTS                                                        -->
-<!-- ============================================================ -->
+<!-- Scripts -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="config.js"></script>
 <script type="module" src="app.js"></script>
