@@ -167,8 +167,12 @@ async function onGoogleCredential(resp) {
 
     initFloorplan();
     await autoPlaceOrphanRooms();
-    show('screen-home');
-    renderHome();
+    // Try to return the user to whatever screen they were on before the refresh
+    const restored = restoreNavState();
+    if (!restored) {
+      show('screen-home');
+      renderHome();
+    }
   } catch (err) {
     console.error(err);
     toast('sign-in failed: ' + err.message, 4000);
@@ -182,6 +186,7 @@ document.getElementById('logout-btn').onclick = () => {
   rooms.clear(); devices.clear();
   userSub = null; user = null;
   sessionStorage.removeItem('google_id_token');
+  sessionStorage.removeItem('nav');
   google.accounts.id.disableAutoSelect();
   show('screen-login');
 };
@@ -202,11 +207,13 @@ async function fetchRooms() {
 async function fetchDevices() {
   try {
     const items = await dynamoQuery(DEVICES_TABLE, 'user_id', userSub);
-    devices.clear();
+    const seenIds = new Set();
     for (const it of items) {
-      // Carry forward last-seen timestamp so isDeviceLive() works without
-      // waiting for a fresh MQTT state message.
-      it.lastSeen = Number(it.updated_at) || 0;
+      seenIds.add(it.device_id);
+      const existing = devices.get(it.device_id);
+      const dbStamp  = Number(it.updated_at) || 0;
+      const memStamp = Number(existing?.lastSeen) || 0;
+
       // Migration: old-style rows without `appliances` array
       if (!Array.isArray(it.appliances)) {
         it.appliances = [{
@@ -224,7 +231,22 @@ async function fetchDevices() {
           },
         }];
       }
+
+      // If MQTT already gave us fresher data than DynamoDB, prefer that — this
+      // avoids a race where the retained state message arrives before fetchDevices
+      // completes, only for fetchDevices to overwrite it with stale DB data.
+      if (existing && memStamp > dbStamp) {
+        it.appliances = existing.appliances || it.appliances;
+        it.online     = existing.online ?? it.online;
+        it.lastSeen   = memStamp;
+      } else {
+        it.lastSeen = dbStamp;
+      }
       devices.set(it.device_id, it);
+    }
+    // Remove devices that no longer exist server-side
+    for (const id of [...devices.keys()]) {
+      if (!seenIds.has(id)) devices.delete(id);
     }
   } catch (e) {
     console.error('fetchDevices:', e); toast('could not load devices', 4000);
@@ -298,12 +320,50 @@ function cmd(type, payload = {}) {
 
 // A device is "live" if it reported online recently. The DynamoDB online flag
 // can be stale if the device crashed without a clean disconnect, so we also
-// require its last heartbeat (updated_at / lastSeen) to be within 90 seconds.
+// require its last heartbeat (updated_at / lastSeen) to be within the threshold.
+// 180s = 3 minutes = three missed 60s heartbeats. Tighter than this and we get
+// false-offline reports when the network has a brief hiccup.
+const LIVE_THRESHOLD_MS = 180_000;
 function isDeviceLive(device) {
   if (!device || !device.online) return false;
   const t = Number(device.lastSeen || device.updated_at || 0);
-  if (!t) return device.online;  // best-effort if we have no timestamp
-  return (Date.now() - t) < 90_000;
+  if (!t) return device.online;
+  return (Date.now() - t) < LIVE_THRESHOLD_MS;
+}
+
+// =================== navigation state persistence ===================
+// Remembering which screen the user was on so a page refresh keeps them there.
+function saveNavState() {
+  const home = document.getElementById('screen-home').style.display !== 'none';
+  const room = document.getElementById('screen-room').style.display !== 'none';
+  const ctrl = document.getElementById('screen-control').style.display !== 'none';
+  let state = null;
+  if (ctrl && currentDevice && currentAppliance) {
+    state = { screen: 'control', deviceId: currentDevice, applianceId: currentAppliance.id, roomId: currentRoomId };
+  } else if (room && currentRoomId) {
+    state = { screen: 'room', roomId: currentRoomId };
+  } else if (home) {
+    state = { screen: 'home' };
+  }
+  if (state) sessionStorage.setItem('nav', JSON.stringify(state));
+}
+function restoreNavState() {
+  let s = null;
+  try { s = JSON.parse(sessionStorage.getItem('nav') || 'null'); } catch {}
+  if (!s) return false;
+  if (s.screen === 'control' && s.deviceId && s.applianceId) {
+    const d = devices.get(s.deviceId);
+    const ap = d && (d.appliances || []).find(a => a.id === s.applianceId);
+    if (d && ap) {
+      if (s.roomId && rooms.has(s.roomId)) currentRoomId = s.roomId;
+      openControl(s.deviceId, s.applianceId);
+      return true;
+    }
+  } else if (s.screen === 'room' && s.roomId && rooms.has(s.roomId)) {
+    openRoom(s.roomId);
+    return true;
+  }
+  return false;
 }
 
 // Periodically re-render so offline status updates as the heartbeat ages out.
@@ -576,6 +636,7 @@ function openRoom(roomId) {
   document.getElementById('room-name').textContent = `${r.icon || '🚪'} ${r.name}`;
   show('screen-room');
   renderRoom();
+  saveNavState();
 }
 function renderRoom() {
   if (!currentRoomId) return;
@@ -591,7 +652,7 @@ function renderRoom() {
       }
   empty.style.display = count === 0 ? '' : 'none';
 }
-document.getElementById('room-back-btn').onclick = () => { currentRoomId = null; show('screen-home'); renderHome(); };
+document.getElementById('room-back-btn').onclick = () => { currentRoomId = null; show('screen-home'); renderHome(); saveNavState(); };
 document.getElementById('room-edit-btn').onclick = () => openRoomDialog(currentRoomId);
 
 function applianceTile(device, appliance) {
@@ -638,11 +699,13 @@ function openControl(deviceId, applianceId) {
   show('screen-control');
   renderControl();
   if (currentAppliance.type !== 'ac') cmd('list_buttons', { appliance_id: currentAppliance.id });
+  saveNavState();
 }
 document.getElementById('control-back-btn').onclick = () => {
   currentDevice = null; currentAppliance = null; currentButtons = [];
   if (currentRoomId) { show('screen-room'); renderRoom(); }
   else               { show('screen-home'); renderHome(); }
+  saveNavState();
 };
 document.getElementById('control-settings-btn').onclick = () => openSettings();
 
