@@ -543,6 +543,19 @@ function renderScenes() {
   if (!grid) return;
   grid.innerHTML = '';
   const list = [...scenes.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  if (list.length === 0) {
+    const intro = document.createElement('div');
+    intro.className = 'scenes-empty';
+    intro.innerHTML = `
+      <p class="dim small">
+        <strong>Scenes</strong> are one-tap shortcuts that fire multiple commands at once. Example:
+        a <em>"Movie Time"</em> scene that turns the Living Room AC down to 22°C in Cool mode
+        <em>and</em> presses the "off" button on the fan — all from one tap.
+        Useful if you find yourself doing the same combination of things often.
+      </p>
+    `;
+    grid.appendChild(intro);
+  }
   for (const s of list) {
     const card = document.createElement('div');
     card.className = 'scene-card';
@@ -554,7 +567,7 @@ function renderScenes() {
       <button class="scene-edit" data-edit="${s.scene_id}">edit</button>
     `;
     card.onclick = (e) => {
-      if (e.target.dataset?.edit) return;  // edit button handled separately
+      if (e.target.dataset?.edit) return;
       fireScene(s.scene_id);
     };
     card.querySelector('.scene-edit').onclick = (e) => {
@@ -576,7 +589,13 @@ function renderSchedules() {
   list.innerHTML = '';
   const sched = [...schedules.values()].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   if (sched.length === 0) {
-    list.innerHTML = '<p class="dim small">No schedules yet. Schedules fire even when your phone is off — see Part F of SETUP.md.</p>';
+    list.innerHTML = `
+      <p class="dim small">
+        No schedules yet. Schedules fire automatically at a chosen time, even when your phone is off.
+        <br><br>
+        <strong>Best way to add one:</strong> open an appliance → ⚙ settings → "+ add" under Schedules.
+        That's much easier because the appliance is already known.
+      </p>`;
     return;
   }
   const dayLetters = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -584,11 +603,16 @@ function renderSchedules() {
     const card = document.createElement('div');
     card.className = 'schedule-card' + (s.enabled === false ? ' disabled' : '');
     const days = (s.days || []).map(d => dayLetters[d]).join(' · ');
+    // Find which appliance this schedule targets (from its first action)
+    const a0 = s.actions?.[0];
+    const dev = devices.get(a0?.device_id);
+    const ap  = dev?.appliances?.find(x => x.id === a0?.payload?.appliance_id);
+    const targetLabel = ap ? `${APPLIANCE_ICONS[ap.type] || ''} ${ap.name}` : '';
     card.innerHTML = `
       <div class="sc-time">${escapeHTML(s.time || '--:--')}</div>
       <div class="sc-meta">
         <div class="sc-name">${escapeHTML(s.name || 'Unnamed')}</div>
-        <div class="sc-days">${escapeHTML(days || 'no days set')}</div>
+        <div class="sc-days">${escapeHTML([targetLabel, days].filter(Boolean).join(' · '))}</div>
       </div>
       <div class="sc-toggle ${s.enabled === false ? '' : 'on'}" data-toggle="${s.schedule_id}"></div>
     `;
@@ -597,7 +621,12 @@ function renderSchedules() {
         toggleSchedule(s.schedule_id);
         return;
       }
-      openScheduleDialog(s.schedule_id);
+      // Prefer per-appliance editor if this schedule targets a known appliance
+      if (ap && dev) {
+        openApplianceScheduleDialog(dev.device_id, ap.id, s.schedule_id);
+      } else {
+        openScheduleDialog(s.schedule_id);
+      }
     };
     list.appendChild(card);
   }
@@ -1157,6 +1186,8 @@ function openSettings() {
       brandSel.appendChild(opt);
     }
   }
+  // Render schedules for this appliance inside the dialog
+  renderApplianceSchedules(currentDevice, currentAppliance.id);
   document.getElementById('settings-dialog').showModal();
 }
 document.getElementById('settings-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('settings-dialog').close(); };
@@ -1243,22 +1274,20 @@ document.getElementById('zoom-out').onclick = () => floorplan?.zoomOut();
 document.getElementById('zoom-fit').onclick = () => floorplan?.fitToContent();
 
 // ============================================================
-// SCENES + SCHEDULES — dialog helpers
+// SCENES + SCHEDULES — helpers
 // ============================================================
 //
 // An "action" is { device_id, type, payload }
 //   type 'set_ac':    payload { appliance_id, power, mode, degrees, fanspeed, protocol }
 //   type 'send_raw':  payload { appliance_id, button }
 
-const AC_MODE_OPTIONS = AC_MODES.map(m => ({ v: m.v, label: `${m.icon} ${m.label}` }));
-
-// Render the list of actions inside a scene or schedule dialog, with the
-// "remove" button wired up. `containerId` is the target DOM id.
-function renderActions(containerId, actions, onChange) {
+// Render existing actions in a scene/schedule editor with their description
+// and a remove button. The `actions` array is mutated in place.
+function renderActions(containerId, actions, refresh) {
   const container = document.getElementById(containerId);
   container.innerHTML = '';
   if (actions.length === 0) {
-    container.innerHTML = '<p class="dim small">No actions yet. Tap "+ add action" to start building.</p>';
+    container.innerHTML = '<p class="dim small">No actions yet. Click "+ add action" below.</p>';
     return;
   }
   actions.forEach((a, idx) => {
@@ -1284,61 +1313,167 @@ function renderActions(containerId, actions, onChange) {
     row.querySelector('.ax-remove').onclick = (e) => {
       e.preventDefault();
       actions.splice(idx, 1);
-      onChange();
+      refresh();
     };
     container.appendChild(row);
   });
 }
 
-// Show a small prompt-flow to add one action: pick device → pick appliance → pick op
-async function promptAddAction() {
-  if (devices.size === 0) { toast('add a device first'); return null; }
+// Render an inline action-picker form into a host element. When the user picks
+// values and clicks "Add", call onAdd({ device_id, type, payload }). The form
+// removes itself on either Add or Cancel.
+function showActionPickerForm(hostId, onAdd) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
 
-  // Step 1: pick device
-  const deviceOpts = [...devices.values()].map(d => `${d.device_id}:${d.name || d.device_id}`);
-  const deviceId = window.prompt(
-    'Pick a device by its id:\n\n' + deviceOpts.join('\n'),
-    [...devices.keys()][0]
-  );
-  if (!deviceId || !devices.get(deviceId)) return null;
-  const d = devices.get(deviceId);
-
-  // Step 2: pick appliance
-  const aps = d.appliances || [];
-  if (aps.length === 0) { toast('this device has no appliances'); return null; }
-  const apOpts = aps.map(a => `${a.id}:${a.name} (${a.type})`);
-  const apId = window.prompt(
-    'Pick an appliance:\n\n' + apOpts.join('\n'),
-    aps[0].id
-  );
-  if (!apId) return null;
-  const ap = aps.find(a => a.id === apId);
-  if (!ap) return null;
-
-  // Step 3: pick op based on appliance type
-  if (ap.type === 'ac') {
-    const power = window.confirm('Turn ON? (Cancel = turn off)');
-    if (!power) {
-      return { device_id: deviceId, type: 'set_ac',
-               payload: { appliance_id: apId, power: false, protocol: ap.state?.protocol || 16 } };
-    }
-    const degrees = parseInt(window.prompt('Temperature °C (16-30):', '24'), 10) || 24;
-    const modeStr = window.prompt('Mode: cool / heat / fan / dry / auto', 'cool') || 'cool';
-    const m = AC_MODES.find(x => x.key === modeStr.toLowerCase()) || AC_MODES[1];
-    return {
-      device_id: deviceId, type: 'set_ac',
-      payload: {
-        appliance_id: apId, power: true, protocol: ap.state?.protocol || 16,
-        mode: m.v, degrees, fanspeed: 0, swingv: 255,
-      }
-    };
-  } else {
-    // fan / generic: send a learned button
-    const btnName = window.prompt('Button name to send:', 'power');
-    if (!btnName) return null;
-    return { device_id: deviceId, type: 'send_raw',
-             payload: { appliance_id: apId, button: btnName.trim() } };
+  if (devices.size === 0) {
+    host.innerHTML = '<p class="dim small">No devices paired yet. Pair one first from the home screen.</p>';
+    setTimeout(() => host.innerHTML = '', 3500);
+    return;
   }
+
+  // Build form HTML
+  const deviceOpts = [...devices.values()].map(d =>
+    `<option value="${escapeHTML(d.device_id)}">${escapeHTML(d.name || d.device_id)}</option>`
+  ).join('');
+
+  host.innerHTML = `
+    <div class="action-picker">
+      <div class="ap-row">
+        <label>Device</label>
+        <select class="ap-device">${deviceOpts}</select>
+      </div>
+      <div class="ap-row">
+        <label>Appliance</label>
+        <select class="ap-appliance"></select>
+      </div>
+      <div class="ap-params"></div>
+      <div class="ap-buttons">
+        <button class="ghost ap-cancel">cancel</button>
+        <button class="primary ap-add">add action</button>
+      </div>
+    </div>
+  `;
+
+  const $device    = host.querySelector('.ap-device');
+  const $appliance = host.querySelector('.ap-appliance');
+  const $params    = host.querySelector('.ap-params');
+
+  function rebuildAppliances() {
+    const d = devices.get($device.value);
+    const aps = d?.appliances || [];
+    $appliance.innerHTML = aps.map(a =>
+      `<option value="${escapeHTML(a.id)}">${escapeHTML(a.name)} (${a.type})</option>`
+    ).join('');
+    rebuildParams();
+  }
+
+  function rebuildParams() {
+    const d = devices.get($device.value);
+    const ap = d?.appliances?.find(x => x.id === $appliance.value);
+    if (!ap) { $params.innerHTML = ''; return; }
+    if (ap.type === 'ac') {
+      const modeOpts = AC_MODES.map(m => `<option value="${m.v}">${m.icon} ${m.label}</option>`).join('');
+      const fanOpts  = AC_FANS.map(f  => `<option value="${f.v}">${f.label}</option>`).join('');
+      $params.innerHTML = `
+        <div class="ap-row">
+          <label>Action</label>
+          <div class="pill-group">
+            <button class="active" data-power="on"  type="button">Turn ON</button>
+            <button data-power="off" type="button">Turn OFF</button>
+          </div>
+        </div>
+        <div class="ap-on-params">
+          <div class="ap-row">
+            <label>Mode</label>
+            <select class="ap-mode">${modeOpts}</select>
+          </div>
+          <div class="ap-row">
+            <label>Temp (°C)</label>
+            <input class="ap-temp" type="number" min="16" max="30" value="24">
+          </div>
+          <div class="ap-row">
+            <label>Fan speed</label>
+            <select class="ap-fan">${fanOpts}</select>
+          </div>
+        </div>
+      `;
+      const onParams = $params.querySelector('.ap-on-params');
+      $params.querySelectorAll('[data-power]').forEach(b => {
+        b.onclick = (e) => {
+          e.preventDefault();
+          $params.querySelectorAll('[data-power]').forEach(x => x.classList.remove('active'));
+          b.classList.add('active');
+          onParams.style.display = b.dataset.power === 'on' ? '' : 'none';
+        };
+      });
+    } else {
+      // fan / generic — need a button picker. Pull from currentButtons if this is the
+      // currently-open appliance (it'll have the latest list). Otherwise the user has to type.
+      const showingThis = currentAppliance && currentAppliance.id === ap.id;
+      const knownButtons = showingThis ? currentButtons : [];
+      const btnOpts = knownButtons.length
+        ? knownButtons.map(b => `<option value="${escapeHTML(b)}">${escapeHTML(b)}</option>`).join('')
+        : '<option value="">(no learned buttons known — type one below)</option>';
+      $params.innerHTML = `
+        <div class="ap-row">
+          <label>Button to press</label>
+          <select class="ap-button">${btnOpts}</select>
+        </div>
+        <div class="ap-row">
+          <label class="dim small">or type a button name</label>
+          <input class="ap-button-custom" type="text" placeholder="e.g. power">
+        </div>
+      `;
+    }
+  }
+
+  $device.onchange    = rebuildAppliances;
+  $appliance.onchange = rebuildParams;
+  rebuildAppliances();
+
+  host.querySelector('.ap-cancel').onclick = (e) => { e.preventDefault(); host.innerHTML = ''; };
+  host.querySelector('.ap-add').onclick = (e) => {
+    e.preventDefault();
+    const deviceId = $device.value;
+    const applianceId = $appliance.value;
+    const d  = devices.get(deviceId);
+    const ap = d?.appliances?.find(x => x.id === applianceId);
+    if (!ap) return;
+
+    let action;
+    if (ap.type === 'ac') {
+      const isOn = $params.querySelector('[data-power].active')?.dataset.power === 'on';
+      if (!isOn) {
+        action = {
+          device_id: deviceId, type: 'set_ac',
+          payload: { appliance_id: applianceId, power: false, protocol: ap.state?.protocol || 16 },
+        };
+      } else {
+        const mode  = Number($params.querySelector('.ap-mode').value);
+        const temp  = Number($params.querySelector('.ap-temp').value) || 24;
+        const fan   = Number($params.querySelector('.ap-fan').value);
+        action = {
+          device_id: deviceId, type: 'set_ac',
+          payload: {
+            appliance_id: applianceId,
+            power: true,
+            protocol: ap.state?.protocol || 16,
+            mode, degrees: temp, fanspeed: fan, swingv: 255,
+          },
+        };
+      }
+    } else {
+      const btn = ($params.querySelector('.ap-button-custom').value || $params.querySelector('.ap-button').value || '').trim();
+      if (!btn) { toast('pick or type a button name'); return; }
+      action = {
+        device_id: deviceId, type: 'send_raw',
+        payload: { appliance_id: applianceId, button: btn },
+      };
+    }
+    onAdd(action);
+    host.innerHTML = '';
+  };
 }
 
 // ============================================================
@@ -1364,12 +1499,19 @@ function openSceneDialog(sceneId) {
   document.getElementById('scene-dialog').showModal();
 }
 document.getElementById('scene-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('scene-dialog').close(); };
-document.getElementById('scene-add-action').onclick = async (e) => {
+document.getElementById('scene-add-action').onclick = (e) => {
   e.preventDefault();
-  const a = await promptAddAction();
-  if (!a) return;
-  editingScene.actions.push(a);
-  renderActions('scene-actions', editingScene.actions, () => renderActions('scene-actions', editingScene.actions, () => {}));
+  // Create or reuse a host for the inline form right above the button
+  let host = document.getElementById('scene-action-form-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'scene-action-form-host';
+    document.getElementById('scene-add-action').before(host);
+  }
+  showActionPickerForm('scene-action-form-host', (action) => {
+    editingScene.actions.push(action);
+    renderActions('scene-actions', editingScene.actions, () => renderActions('scene-actions', editingScene.actions, () => {}));
+  });
 };
 document.getElementById('scene-save').onclick = async (e) => {
   e.preventDefault();
@@ -1434,12 +1576,12 @@ function openScheduleDialog(scheduleId) {
   document.getElementById('schedule-dialog').showModal();
 }
 document.getElementById('schedule-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('schedule-dialog').close(); };
-document.getElementById('schedule-add-action').onclick = async (e) => {
+document.getElementById('schedule-add-action').onclick = (e) => {
   e.preventDefault();
-  const a = await promptAddAction();
-  if (!a) return;
-  editingSchedule.actions.push(a);
-  renderActions('schedule-actions', editingSchedule.actions, () => renderActions('schedule-actions', editingSchedule.actions, () => {}));
+  showActionPickerForm('schedule-action-form-host', (action) => {
+    editingSchedule.actions.push(action);
+    renderActions('schedule-actions', editingSchedule.actions, () => renderActions('schedule-actions', editingSchedule.actions, () => {}));
+  });
 };
 document.getElementById('schedule-save').onclick = async (e) => {
   e.preventDefault();
@@ -1483,3 +1625,221 @@ document.getElementById('schedule-delete').onclick = async (e) => {
   }
 };
 document.getElementById('add-schedule-btn').onclick = () => openScheduleDialog(null);
+
+// ============================================================
+// APPLIANCE-SCOPED SCHEDULES
+// ============================================================
+// Schedules logically belong to an appliance — opened from the settings dialog.
+// The device + appliance are known from context so the form is much simpler:
+// just time / days / action params (no device or appliance picker).
+
+let editingApplianceSchedule = null;
+let editingApplianceContext  = null;  // { deviceId, applianceId }
+
+// Return all schedules whose first action targets this device+appliance.
+function schedulesForAppliance(deviceId, applianceId) {
+  const out = [];
+  for (const s of schedules.values()) {
+    const a = (s.actions || [])[0];
+    if (a?.device_id === deviceId && a?.payload?.appliance_id === applianceId) out.push(s);
+  }
+  return out.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+}
+
+// Called from openSettings() to render the in-dialog schedule list.
+function renderApplianceSchedules(deviceId, applianceId) {
+  const host = document.getElementById('settings-schedules-list');
+  if (!host) return;
+  const list = schedulesForAppliance(deviceId, applianceId);
+  if (list.length === 0) {
+    host.innerHTML = '<p class="dim small">No schedules for this appliance. Tap "+ add" to create one.</p>';
+    return;
+  }
+  const dayLetters = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  host.innerHTML = '';
+  for (const s of list) {
+    const card = document.createElement('div');
+    card.className = 'mini-schedule';
+    const days = (s.days || []).map(d => dayLetters[d]).join(' · ');
+    card.innerHTML = `
+      <div class="ms-time">${escapeHTML(s.time || '--:--')}</div>
+      <div class="ms-meta">
+        <div class="ms-name">${escapeHTML(s.name || 'Unnamed')}</div>
+        <div class="ms-days dim small">${escapeHTML(days || 'no days set')}</div>
+      </div>
+      <div class="sc-toggle ${s.enabled === false ? '' : 'on'}" title="toggle"></div>
+    `;
+    card.querySelector('.sc-toggle').onclick = (e) => { e.stopPropagation(); toggleSchedule(s.schedule_id); setTimeout(() => renderApplianceSchedules(deviceId, applianceId), 200); };
+    card.onclick = () => openApplianceScheduleDialog(deviceId, applianceId, s.schedule_id);
+    host.appendChild(card);
+  }
+}
+
+// Open the per-appliance schedule dialog. If scheduleId is null we create new.
+function openApplianceScheduleDialog(deviceId, applianceId, scheduleId) {
+  const d = devices.get(deviceId);
+  const ap = d?.appliances?.find(a => a.id === applianceId);
+  if (!ap) return;
+  editingApplianceContext = { deviceId, applianceId };
+
+  const existing = scheduleId ? schedules.get(scheduleId) : null;
+  editingApplianceSchedule = existing
+    ? { ...existing, days: [...(existing.days || [])], actions: [...(existing.actions || [])] }
+    : { schedule_id: uid(), name: '', time: '07:00', days: [1,2,3,4,5], enabled: true, actions: [], timezone: 'Asia/Singapore' };
+
+  document.getElementById('ash-title').textContent = scheduleId ? 'Edit schedule' : 'New schedule';
+  document.getElementById('ash-subtitle').textContent = `${APPLIANCE_ICONS[ap.type] || ''} ${ap.name}`;
+  document.getElementById('ash-delete').style.display = scheduleId ? '' : 'none';
+  document.getElementById('ash-name').value = editingApplianceSchedule.name || '';
+  document.getElementById('ash-time').value = editingApplianceSchedule.time || '07:00';
+  document.getElementById('ash-enabled').checked = editingApplianceSchedule.enabled !== false;
+
+  // Days picker
+  document.querySelectorAll('#ash-days button').forEach(b => {
+    const d = Number(b.dataset.day);
+    b.classList.toggle('selected', editingApplianceSchedule.days.includes(d));
+    b.onclick = (e) => {
+      e.preventDefault();
+      const i = editingApplianceSchedule.days.indexOf(d);
+      if (i >= 0) editingApplianceSchedule.days.splice(i, 1);
+      else        editingApplianceSchedule.days.push(d);
+      b.classList.toggle('selected');
+    };
+  });
+
+  // Show the right action section based on appliance type
+  const acSection  = document.getElementById('ash-ac-section');
+  const btnSection = document.getElementById('ash-button-section');
+  acSection.style.display  = ap.type === 'ac' ? '' : 'none';
+  btnSection.style.display = ap.type === 'ac' ? 'none' : '';
+
+  if (ap.type === 'ac') {
+    const modeSel = document.getElementById('ash-mode');
+    modeSel.innerHTML = AC_MODES.map(m => `<option value="${m.v}">${m.icon} ${m.label}</option>`).join('');
+    const fanSel = document.getElementById('ash-fan');
+    fanSel.innerHTML = AC_FANS.map(f => `<option value="${f.v}">${f.label}</option>`).join('');
+    // Pre-fill from existing action if editing
+    const existingAction = (editingApplianceSchedule.actions[0]?.payload) || {};
+    const isOn = existingAction.power !== false;
+    document.getElementById('ash-power-on').classList.toggle('active', isOn);
+    document.getElementById('ash-power-off').classList.toggle('active', !isOn);
+    document.getElementById('ash-on-params').style.display = isOn ? '' : 'none';
+    if (existingAction.mode != null)    modeSel.value = String(existingAction.mode);
+    if (existingAction.degrees != null) document.getElementById('ash-temp').value = existingAction.degrees;
+    if (existingAction.fanspeed != null) fanSel.value = String(existingAction.fanspeed);
+    document.getElementById('ash-power-on').onclick = (e) => {
+      e.preventDefault();
+      document.getElementById('ash-power-on').classList.add('active');
+      document.getElementById('ash-power-off').classList.remove('active');
+      document.getElementById('ash-on-params').style.display = '';
+    };
+    document.getElementById('ash-power-off').onclick = (e) => {
+      e.preventDefault();
+      document.getElementById('ash-power-off').classList.add('active');
+      document.getElementById('ash-power-on').classList.remove('active');
+      document.getElementById('ash-on-params').style.display = 'none';
+    };
+  } else {
+    // fan / generic — populate button picker from currentButtons (which has the latest list)
+    const sel = document.getElementById('ash-button');
+    if (currentButtons.length > 0) {
+      sel.innerHTML = currentButtons.map(b => `<option value="${escapeHTML(b)}">${escapeHTML(b)}</option>`).join('');
+    } else {
+      sel.innerHTML = '<option value="">(no buttons learned yet — open the control screen and teach one first)</option>';
+    }
+    const existingBtn = editingApplianceSchedule.actions[0]?.payload?.button;
+    if (existingBtn) sel.value = existingBtn;
+  }
+
+  document.getElementById('appliance-schedule-dialog').showModal();
+}
+
+document.getElementById('ash-cancel').onclick = (e) => {
+  e.preventDefault();
+  document.getElementById('appliance-schedule-dialog').close();
+};
+document.getElementById('ash-save').onclick = async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('ash-name').value.trim();
+  const time = document.getElementById('ash-time').value;
+  if (!name) { toast('name the schedule'); return; }
+  if (!time) { toast('set a time'); return; }
+  if (editingApplianceSchedule.days.length === 0) { toast('pick at least one day'); return; }
+
+  const { deviceId, applianceId } = editingApplianceContext;
+  const d = devices.get(deviceId);
+  const ap = d?.appliances?.find(a => a.id === applianceId);
+  if (!ap) return;
+
+  // Build the single action for this appliance
+  let action;
+  if (ap.type === 'ac') {
+    const isOn = document.getElementById('ash-power-on').classList.contains('active');
+    if (!isOn) {
+      action = {
+        device_id: deviceId, type: 'set_ac',
+        payload: { appliance_id: applianceId, power: false, protocol: ap.state?.protocol || 16 },
+      };
+    } else {
+      const mode = Number(document.getElementById('ash-mode').value);
+      const temp = Number(document.getElementById('ash-temp').value) || 24;
+      const fan  = Number(document.getElementById('ash-fan').value);
+      action = {
+        device_id: deviceId, type: 'set_ac',
+        payload: {
+          appliance_id: applianceId, power: true,
+          protocol: ap.state?.protocol || 16,
+          mode, degrees: temp, fanspeed: fan, swingv: 255,
+        },
+      };
+    }
+  } else {
+    const btn = document.getElementById('ash-button').value;
+    if (!btn) { toast('pick a learned button (teach one from the control screen first if needed)'); return; }
+    action = {
+      device_id: deviceId, type: 'send_raw',
+      payload: { appliance_id: applianceId, button: btn },
+    };
+  }
+
+  const item = {
+    user_id: userSub,
+    schedule_id: editingApplianceSchedule.schedule_id,
+    name, time,
+    days: editingApplianceSchedule.days,
+    enabled: document.getElementById('ash-enabled').checked,
+    actions: [action],
+    timezone: editingApplianceSchedule.timezone || 'Asia/Singapore',
+  };
+  try {
+    await dynamoPut(SCHEDULES_TABLE, item);
+    schedules.set(item.schedule_id, item);
+    document.getElementById('appliance-schedule-dialog').close();
+    renderApplianceSchedules(deviceId, applianceId);
+    renderSchedules();
+    toast('schedule saved');
+  } catch (err) {
+    toast('save failed: ' + err.message + ' (check that ac-remote-schedules table exists and IAM is updated)', 5000);
+  }
+};
+document.getElementById('ash-delete').onclick = async (e) => {
+  e.preventDefault();
+  if (!confirm('Delete this schedule?')) return;
+  try {
+    await dynamoDelete(SCHEDULES_TABLE, 'user_id', userSub, 'schedule_id', editingApplianceSchedule.schedule_id);
+    schedules.delete(editingApplianceSchedule.schedule_id);
+    document.getElementById('appliance-schedule-dialog').close();
+    const { deviceId, applianceId } = editingApplianceContext || {};
+    if (deviceId) renderApplianceSchedules(deviceId, applianceId);
+    renderSchedules();
+  } catch (err) {
+    toast('delete failed: ' + err.message, 4000);
+  }
+};
+
+// Wire the "+ add schedule" button inside the settings dialog
+document.getElementById('settings-add-schedule').onclick = (e) => {
+  e.preventDefault();
+  if (!currentDevice || !currentAppliance) return;
+  openApplianceScheduleDialog(currentDevice, currentAppliance.id, null);
+};
