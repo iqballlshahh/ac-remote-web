@@ -203,6 +203,9 @@ async function fetchDevices() {
     const items = await dynamoQuery(DEVICES_TABLE, 'user_id', userSub);
     devices.clear();
     for (const it of items) {
+      // Carry forward last-seen timestamp so isDeviceLive() works without
+      // waiting for a fresh MQTT state message.
+      it.lastSeen = Number(it.updated_at) || 0;
       // Migration: old-style rows without `appliances` array
       if (!Array.isArray(it.appliances)) {
         it.appliances = [{
@@ -275,9 +278,38 @@ function handleEvent(deviceId, ev) {
 
 function cmd(type, payload = {}) {
   if (!currentDevice) return;
+  // Block sends to offline devices, with one exception: factory_reset/delete_appliance still go through
+  // (the device may come back online and we want them queued? no — MQTT non-retained means lost.
+  //  Better: warn user that device is offline and the command was not sent.)
+  const d = devices.get(currentDevice);
+  const passThrough = type === 'factory_reset' || type === 'delete_appliance';
+  if (!passThrough && !isDeviceLive(d)) {
+    toast(`device is offline — command not sent`, 3000);
+    return;
+  }
   const topic = `ac-remote/users/${userSub}/devices/${currentDevice}/cmd`;
   mqttPublish(topic, { type, payload });
 }
+
+// A device is "live" if it reported online recently. The DynamoDB online flag
+// can be stale if the device crashed without a clean disconnect, so we also
+// require its last heartbeat (updated_at / lastSeen) to be within 90 seconds.
+function isDeviceLive(device) {
+  if (!device || !device.online) return false;
+  const t = Number(device.lastSeen || device.updated_at || 0);
+  if (!t) return device.online;  // best-effort if we have no timestamp
+  return (Date.now() - t) < 90_000;
+}
+
+// Periodically re-render so offline status updates as the heartbeat ages out.
+setInterval(() => {
+  const home = document.getElementById('screen-home');
+  const room = document.getElementById('screen-room');
+  const ctrl = document.getElementById('screen-control');
+  if (home.style.display !== 'none' || room.style.display !== 'none' || ctrl.style.display !== 'none') {
+    rerender();
+  }
+}, 15_000);
 
 // ============================================================
 // FLOORPLAN BOOTSTRAP + HOME RENDERING
@@ -437,6 +469,18 @@ document.getElementById('delete-selected-room').onclick = async () => {
 // ============================================================
 // ROOM DIALOG (add / edit)
 // ============================================================
+// Auto-suggest room name from icon
+const ICON_TO_NAME = {
+  '🛋️': 'Living Room',
+  '🛏️': 'Bedroom',
+  '🍳': 'Kitchen',
+  '🛁': 'Bathroom',
+  '🚪': 'Hallway',
+  '💼': 'Office',
+  '🎮': 'Game Room',
+  '📚': 'Study',
+  '🪴': 'Balcony',
+};
 let editingRoomId = null;
 function openRoomDialog(roomId) {
   editingRoomId = roomId;
@@ -444,13 +488,23 @@ function openRoomDialog(roomId) {
   document.getElementById('room-dialog-title').textContent = isEdit ? 'Edit room' : 'Add a room';
   document.getElementById('room-delete').style.display = isEdit ? '' : 'none';
   const r = isEdit ? rooms.get(roomId) : { name: '', icon: '🚪' };
-  document.getElementById('room-name-input').value = r.name || '';
+  const nameInput = document.getElementById('room-name-input');
+  nameInput.value = r.name || '';
+  // Whether the name input has been manually edited this session
+  let userEdited = !!r.name;
+  nameInput.oninput = () => { userEdited = true; };
+
   document.querySelectorAll('#room-icon-picker button').forEach(b => {
     b.classList.toggle('selected', b.dataset.icon === (r.icon || '🚪'));
     b.onclick = (e) => {
       e.preventDefault();
       document.querySelectorAll('#room-icon-picker button').forEach(x => x.classList.remove('selected'));
       b.classList.add('selected');
+      // Auto-fill name from the icon if the user hasn't typed their own yet
+      if (!userEdited) {
+        const suggested = ICON_TO_NAME[b.dataset.icon];
+        if (suggested) nameInput.value = suggested;
+      }
     };
   });
   document.getElementById('room-dialog').showModal();
@@ -528,12 +582,16 @@ function applianceTile(device, appliance) {
   el.className = 'appliance-tile';
   const state = appliance.state || {};
   const isOn = state.power === true;
-  if (isOn) el.classList.add('power-on');
-  let summary = 'off';
-  if (appliance.type === 'ac') {
+  const live = isDeviceLive(device);
+  if (isOn && live) el.classList.add('power-on');
+  if (!live) el.classList.add('offline');
+  let summary;
+  if (!live) {
+    summary = 'offline';
+  } else if (appliance.type === 'ac') {
     summary = isOn
       ? `${(AC_MODES.find(m => m.v === state.mode) || {}).label || ''} · ${state.degrees || '?'}°`
-      : 'off';
+      : 'standby';
   } else if (appliance.type === 'fan') {
     summary = 'fan';
   } else {
@@ -545,7 +603,7 @@ function applianceTile(device, appliance) {
       <div class="ap-name">${escapeHTML(appliance.name)}</div>
       <div class="ap-state">${escapeHTML(summary)}</div>
     </div>
-    <div class="ap-online ${device.online ? 'on' : ''}" title="${device.online ? 'online' : 'offline'}"></div>
+    <div class="ap-online ${live ? 'on' : ''}" title="${live ? 'online' : 'offline'}"></div>
   `;
   el.onclick = () => openControl(device.device_id, appliance.id);
   return el;
@@ -577,6 +635,21 @@ function renderControl() {
   currentAppliance = (d.appliances || []).find(a => a.id === currentAppliance.id) || currentAppliance;
   const body = document.getElementById('control-body');
   body.innerHTML = '';
+
+  // Offline banner — sits above the control widget regardless of appliance type
+  if (!isDeviceLive(d)) {
+    const banner = document.createElement('div');
+    banner.className = 'offline-banner';
+    banner.innerHTML = `
+      <span class="offline-dot"></span>
+      <div>
+        <strong>Device is offline.</strong>
+        <span class="dim small">Check that it's powered on and connected to WiFi. Commands won't be sent until it's back.</span>
+      </div>
+    `;
+    body.appendChild(banner);
+  }
+
   if (currentAppliance.type === 'ac')      renderAcControl(body);
   else if (currentAppliance.type === 'fan') renderFanControl(body);
   else                                       renderGenericControl(body);
@@ -875,6 +948,49 @@ function openSettings() {
   document.getElementById('settings-dialog').showModal();
 }
 document.getElementById('settings-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('settings-dialog').close(); };
+
+document.getElementById('settings-add-appliance').onclick = (e) => {
+  e.preventDefault();
+  document.getElementById('settings-dialog').close();
+  openAddApplianceDialog();
+};
+
+// ---- Add appliance to existing device ----
+function openAddApplianceDialog() {
+  document.getElementById('new-appliance-name').value = '';
+  document.getElementById('new-appliance-type').value = 'fan';
+  const sel = document.getElementById('new-appliance-room');
+  sel.innerHTML = '<option value="">(unassigned)</option>';
+  for (const r of rooms.values()) {
+    const opt = document.createElement('option');
+    opt.value = r.room_id; opt.textContent = `${r.icon || '🚪'} ${r.name}`;
+    const d = devices.get(currentDevice);
+    if ((d?.room_id || '') === r.room_id) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  document.getElementById('add-appliance-dialog').showModal();
+}
+document.getElementById('new-appliance-cancel').onclick = (e) => {
+  e.preventDefault();
+  document.getElementById('add-appliance-dialog').close();
+};
+document.getElementById('new-appliance-save').onclick = async (e) => {
+  e.preventDefault();
+  const type = document.getElementById('new-appliance-type').value;
+  const name = document.getElementById('new-appliance-name').value.trim();
+  const roomId = document.getElementById('new-appliance-room').value || '';
+  if (!name) { toast('name the appliance'); return; }
+  if (!isDeviceLive(devices.get(currentDevice))) {
+    toast('device is offline — bring it online to add an appliance', 3500);
+    return;
+  }
+  const id = uid();
+  cmd('add_appliance', { id, type, name, room_id: roomId });
+  document.getElementById('add-appliance-dialog').close();
+  toast('appliance added');
+  // The device will republish its state with the new appliance — IoT Rule
+  // updates DynamoDB and our subscription updates the UI within a few seconds.
+};
 document.getElementById('settings-save').onclick = (e) => {
   e.preventDefault();
   const newName = document.getElementById('settings-name').value.trim();
