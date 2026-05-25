@@ -15,7 +15,8 @@ export class Floorplan {
   constructor({
     container3D, container2D, canvas3D, svg2D, tooltip3D,
     getRooms, getDeviceCountForRoom, isRoomActive,
-    onRoomTap, onRoomEdit, onLayoutChange,
+    getAppliancesForRoom,
+    onRoomTap, onApplianceTap, onRoomEdit, onLayoutChange,
   }) {
     this.container3D = container3D;
     this.container2D = container2D;
@@ -25,17 +26,20 @@ export class Floorplan {
     this.getRooms = getRooms;
     this.getDeviceCountForRoom = getDeviceCountForRoom;
     this.isRoomActive = isRoomActive;
+    this.getAppliancesForRoom = getAppliancesForRoom;
     this.onRoomTap = onRoomTap;
+    this.onApplianceTap = onApplianceTap;
     this.onRoomEdit = onRoomEdit;
     this.onLayoutChange = onLayoutChange;
 
-    this.mode = 'view';          // 'view' (3D) | 'edit' (2D)
+    this.mode = 'view';
     this.theme = 'light';
     this.selectedRoomId = null;
+    this.hoverRoomId = null;
+    this.hoverBubble = null;
 
-    // 2D editor state
-    this.dragState = null;       // { roomId, mode: 'move'|'resize-tl/tr/bl/br', start... }
-    this.layout = new Map();     // roomId -> { x, y, width, height } (pending changes)
+    this.dragState = null;
+    this.layout = new Map();
 
     this._init3D();
     this._init2D();
@@ -181,6 +185,17 @@ export class Floorplan {
     requestAnimationFrame(() => this._animate());
     if (this.mode === 'view') {
       this.controls.update();
+      // Animate appliance bubbles bobbing and pulsing softly
+      const t = performance.now() / 1000;
+      this.roomGroup.traverse((o) => {
+        if (o.userData?.isBubble && o.userData?.basePos) {
+          const ph = o.userData.bobOffset || 0;
+          o.position.y = o.userData.basePos.y + Math.sin(t * 1.6 + ph) * 0.08;
+          // Subtle pulse on scale
+          const s = 0.95 + Math.sin(t * 1.6 + ph) * 0.04;
+          o.scale.set(s, s, 1);
+        }
+      });
       this.renderer.render(this.scene, this.camera);
     }
   }
@@ -205,10 +220,13 @@ export class Floorplan {
         }
       });
     }
+    this._roomMeshes = new Map();   // roomId -> Group
     const cs = getComputedStyle(document.documentElement);
-    const floorColor   = new THREE.Color(cs.getPropertyValue('--scene-floor').trim() || '#fff');
-    const wallColor    = new THREE.Color(cs.getPropertyValue('--scene-wall').trim()  || '#d0d8e8');
-    const activeColor  = new THREE.Color(cs.getPropertyValue('--scene-room-on').trim() || '#3b82f6');
+    const floorColor    = new THREE.Color(cs.getPropertyValue('--scene-floor').trim() || '#fff');
+    const wallColor     = new THREE.Color(cs.getPropertyValue('--scene-wall').trim()  || '#ffffff');
+    const wallEdgeColor = new THREE.Color(cs.getPropertyValue('--scene-wall-edge').trim() || '#e2e7f0');
+    const activeColor   = new THREE.Color(cs.getPropertyValue('--scene-room-on').trim() || '#dbeafe');
+    const highlightColor= new THREE.Color(cs.getPropertyValue('--scene-highlight').trim() || '#34d399');
 
     const rooms = [...this.getRooms().values()];
     const placements = [];
@@ -220,10 +238,11 @@ export class Floorplan {
       const isActive = this.isRoomActive ? this.isRoomActive(room.room_id) : false;
       const group = this._buildRoomMesh(room, fp, {
         floorColor: isActive ? activeColor : floorColor,
-        wallColor, isActive,
+        wallColor, wallEdgeColor, isActive, highlightColor,
       });
       group.userData.roomId = room.room_id;
       this.roomGroup.add(group);
+      this._roomMeshes.set(room.room_id, group);
       if (!bbox) bbox = { minX: fp.x, minZ: fp.y, maxX: fp.x + fp.width, maxZ: fp.y + fp.height };
       else {
         bbox.minX = Math.min(bbox.minX, fp.x);
@@ -233,20 +252,38 @@ export class Floorplan {
       }
     }
 
-    // Corridors — thin floor strips between adjacent rooms (no walls)
+    // Corridors — full floor + walls along the parallel-to-corridor edges
     const corridors = this._findCorridors(placements);
-    const corridorColor = new THREE.Color(cs.getPropertyValue('--scene-wall').trim() || '#d0d8e8');
+    const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
     for (const c of corridors) {
-      const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(c.width, 0.03, c.height),
-        new THREE.MeshLambertMaterial({ color: floorColor, transparent: true, opacity: 0.85 })
+      const isHorizontal = c.width > c.height;     // wider than tall = side-by-side gap
+      const cFloor = new THREE.Mesh(
+        new THREE.BoxGeometry(c.width, 0.05, c.height),
+        new THREE.MeshLambertMaterial({ color: floorColor })
       );
-      mesh.position.set(c.x + c.width / 2, ROOM_FLOOR_Y - 0.01, c.y + c.height / 2);
-      mesh.userData.isCorridor = true;
-      this.roomGroup.add(mesh);
+      cFloor.position.set(c.x + c.width / 2, ROOM_FLOOR_Y, c.y + c.height / 2);
+      this.roomGroup.add(cFloor);
+      const halfH = WALL_HEIGHT / 2;
+      if (isHorizontal) {
+        // Vertical-axis corridor (rooms stacked) — walls run along the corridor's length (x-axis)
+        const wallTop = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), wallMat.clone());
+        wallTop.position.set(c.x + c.width / 2, halfH, c.y);
+        this.roomGroup.add(wallTop);
+        const wallBot = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), wallMat.clone());
+        wallBot.position.set(c.x + c.width / 2, halfH, c.y + c.height);
+        this.roomGroup.add(wallBot);
+      } else {
+        // Horizontal-axis corridor (rooms side-by-side) — walls run along z-axis
+        const wallL = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), wallMat.clone());
+        wallL.position.set(c.x, halfH, c.y + c.height / 2);
+        this.roomGroup.add(wallL);
+        const wallR = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), wallMat.clone());
+        wallR.position.set(c.x + c.width, halfH, c.y + c.height / 2);
+        this.roomGroup.add(wallR);
+      }
     }
 
-    // Recenter camera target
+    // Recenter camera
     if (bbox) {
       const cx = (bbox.minX + bbox.maxX) / 2;
       const cz = (bbox.minZ + bbox.maxZ) / 2;
@@ -260,7 +297,7 @@ export class Floorplan {
     if (emptyEl) emptyEl.style.display = (rooms.filter(r => r.floor_plan).length === 0) ? '' : 'none';
   }
 
-  _buildRoomMesh(room, fp, { floorColor, wallColor, isActive }) {
+  _buildRoomMesh(room, fp, { floorColor, wallColor, wallEdgeColor, isActive, highlightColor }) {
     const g = new THREE.Group();
     const w = fp.width, d = fp.height, x = fp.x, z = fp.y;
 
@@ -273,7 +310,23 @@ export class Floorplan {
     floor.userData.isFloor = true;
     g.add(floor);
 
-    // 4 walls (thin boxes)
+    // Hover/selection overlay — translucent green plane just above the floor.
+    // Hidden by default; we toggle visibility in the hover/select handler.
+    const overlay = new THREE.Mesh(
+      new THREE.PlaneGeometry(w - 0.06, d - 0.06),
+      new THREE.MeshBasicMaterial({
+        color: highlightColor, transparent: true, opacity: 0.25,
+        depthWrite: false,
+      })
+    );
+    overlay.rotation.x = -Math.PI / 2;
+    overlay.position.set(x + w / 2, ROOM_FLOOR_Y + 0.04, z + d / 2);
+    overlay.visible = false;
+    overlay.userData.isOverlay = true;
+    g.add(overlay);
+    g.userData.overlay = overlay;
+
+    // 4 walls (thin boxes). Walls are explicitly white.
     const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
     const halfH = WALL_HEIGHT / 2;
     const wallN = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, WALL_THICK), wallMat);
@@ -289,45 +342,128 @@ export class Floorplan {
     wallE.position.set(x + w, halfH, z + d / 2);
     g.add(wallE);
 
-    // Floating label sprite (icon + name)
+    // Floating room label
     const sprite = this._buildLabelSprite(room);
-    sprite.position.set(x + w / 2, WALL_HEIGHT + 0.4, z + d / 2);
+    sprite.position.set(x + w / 2, WALL_HEIGHT + 0.7, z + d / 2);
     g.add(sprite);
+
+    // Appliance bubbles — one per appliance in this room.
+    // Render in a horizontal arc above the room floor.
+    if (this.getAppliancesForRoom) {
+      const aps = this.getAppliancesForRoom(room.room_id);
+      const n = aps.length;
+      aps.forEach((a, i) => {
+        const t = n === 1 ? 0 : (i - (n - 1) / 2);
+        const spreadX = Math.min(w * 0.6, n * 0.7);
+        const bx = x + w / 2 + (n === 1 ? 0 : (t / Math.max(1, (n - 1) / 2)) * spreadX / 2);
+        const bz = z + d / 2 - d * 0.15;
+        const by = WALL_HEIGHT * 0.45;
+        const bubble = this._buildApplianceBubble(a);
+        bubble.position.set(bx, by, bz);
+        bubble.userData.roomId = room.room_id;
+        bubble.userData.applianceId = a.id;
+        bubble.userData.deviceId = a.deviceId;
+        bubble.userData.bobOffset = i * 0.7;     // phase for the bobbing animation
+        bubble.userData.basePos = { x: bx, y: by, z: bz };
+        g.add(bubble);
+      });
+    }
 
     return g;
   }
 
-  _buildLabelSprite(room) {
-    // Render text to a canvas, use as a sprite texture so it always faces camera.
-    // Sized large enough to read clearly at default camera distance.
+  _buildApplianceBubble(appliance) {
+    // Sprite with a translucent circle + emoji icon.
     const canvas = document.createElement('canvas');
     const dpr = 2;
-    canvas.width = 512 * dpr; canvas.height = 160 * dpr;
+    canvas.width  = 192 * dpr;
+    canvas.height = 192 * dpr;
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    ctx.font = '700 32px "Plus Jakarta Sans", sans-serif';
+    const cx = 96, cy = 96, r = 72;
+
+    // Outer soft glow
+    const glow = ctx.createRadialGradient(cx, cy, r * 0.4, cx, cy, r * 1.3);
+    glow.addColorStop(0, 'rgba(59,130,246,0.32)');
+    glow.addColorStop(1, 'rgba(59,130,246,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath(); ctx.arc(cx, cy, r * 1.3, 0, Math.PI * 2); ctx.fill();
+
+    // Inner bubble
+    const inner = ctx.createRadialGradient(cx - 18, cy - 22, 6, cx, cy, r);
+    const isOn = !!(appliance.state && appliance.state.power);
+    if (isOn) {
+      inner.addColorStop(0, 'rgba(255,255,255,0.95)');
+      inner.addColorStop(0.6, 'rgba(96,165,250,0.85)');
+      inner.addColorStop(1, 'rgba(37,99,235,0.85)');
+    } else {
+      inner.addColorStop(0, 'rgba(255,255,255,0.95)');
+      inner.addColorStop(0.55, 'rgba(255,255,255,0.85)');
+      inner.addColorStop(1, 'rgba(226,232,240,0.85)');
+    }
+    ctx.fillStyle = inner;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+
+    // Crisp ring
+    ctx.strokeStyle = isOn ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+    // Icon
+    const icon = ({ ac: '❄️', fan: '🌀', generic: '🎛️' })[appliance.type] || '🎛️';
+    ctx.font = '60px "Plus Jakarta Sans", sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.fillText(icon, cx, cy + 4);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(0.95, 0.95, 1);
+    sprite.renderOrder = 800;
+    sprite.userData.isBubble = true;
+    return sprite;
+  }
+
+  _buildLabelSprite(room) {
+    // Large floating sprite — readable from any reasonable camera distance.
+    const canvas = document.createElement('canvas');
+    const dpr = 2;
+    canvas.width = 768 * dpr; canvas.height = 256 * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
     const cs = getComputedStyle(document.documentElement);
     const fg = cs.getPropertyValue('--ink').trim() || '#0f172a';
     const bg = cs.getPropertyValue('--card').trim() || '#fff';
     const stroke = cs.getPropertyValue('--line').trim() || '#e5e7eb';
 
+    ctx.font = '700 44px "Plus Jakarta Sans", sans-serif';
     const iconText = room.icon || '🚪';
     const nameText = room.name || '';
     const iconWidth = ctx.measureText(iconText).width;
     const nameWidth = ctx.measureText(nameText).width;
-    const gap = 14;
+    const gap = 22;
     const tw = iconWidth + gap + nameWidth;
-    const padX = 28, padY = 18;
+    const padX = 38, padY = 22;
     const boxW = tw + padX * 2;
-    const boxH = 64;
-    const boxX = (512 - boxW) / 2;
-    const boxY = 160 / 2 - boxH / 2;
+    const boxH = 94;
+    const boxX = (768 - boxW) / 2;
+    const boxY = 256 / 2 - boxH / 2;
 
+    // Subtle shadow under the pill
+    ctx.shadowColor = 'rgba(15,23,42,0.18)';
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetY = 6;
     ctx.fillStyle = bg;
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = 2;
-    this._roundRect(ctx, boxX, boxY, boxW, boxH, 16);
+    this._roundRect(ctx, boxX, boxY, boxW, boxH, 24);
     ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 2.5;
+    this._roundRect(ctx, boxX, boxY, boxW, boxH, 24);
     ctx.stroke();
     ctx.fillStyle = fg;
     ctx.textBaseline = 'middle';
@@ -336,9 +472,10 @@ export class Floorplan {
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 4;
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(3.2, 1.0, 1);
+    sprite.scale.set(4.5, 1.5, 1);
     sprite.renderOrder = 999;
     sprite.userData.isLabel = true;
     return sprite;
@@ -358,22 +495,36 @@ export class Floorplan {
   }
 
   _onTap3D(e) {
-    const hit = this._pickRoom(e);
-    if (hit) this.onRoomTap?.(hit);
+    const hit = this._pickHit(e);
+    if (!hit) return;
+    if (hit.kind === 'bubble') this.onApplianceTap?.(hit.deviceId, hit.applianceId);
+    else                       this.onRoomTap?.(hit.roomId);
   }
   _onHover3D(e) {
-    const hit = this._pickRoom(e);
+    const hit = this._pickHit(e);
+    // Toggle highlight overlay for hovered room
+    if (this._roomMeshes) {
+      for (const [rid, mesh] of this._roomMeshes) {
+        if (mesh.userData.overlay) {
+          const shouldShow = (hit?.roomId === rid) || (this.selectedRoomId === rid);
+          mesh.userData.overlay.visible = shouldShow;
+        }
+      }
+    }
     if (hit) {
       const rooms = this.getRooms();
-      const room = rooms.get(hit);
+      const room = rooms.get(hit.roomId);
       if (room) {
-        const count = this.getDeviceCountForRoom?.(hit) || 0;
+        const count = this.getDeviceCountForRoom?.(hit.roomId) || 0;
         const tt = this.tooltip3D;
+        const label = (hit.kind === 'bubble' && this.getAppliancesForRoom)
+          ? `tap to control · ${room.icon || ''} ${room.name}`
+          : `${room.icon || '🚪'} ${room.name} — ${count} appliance${count === 1 ? '' : 's'}`;
         tt.style.display = '';
         tt.style.opacity = '1';
         tt.style.left = `${e.offsetX}px`;
-        tt.style.top = `${e.offsetY}px`;
-        tt.textContent = `${room.icon || '🚪'} ${room.name} — ${count} appliance${count === 1 ? '' : 's'}`;
+        tt.style.top  = `${e.offsetY}px`;
+        tt.textContent = label;
         this.canvas3D.style.cursor = 'pointer';
         return;
       }
@@ -384,7 +535,10 @@ export class Floorplan {
   _hideTooltip() {
     if (this.tooltip3D) this.tooltip3D.style.opacity = '0';
   }
-  _pickRoom(e) {
+
+  // Pick the first room or bubble under the pointer.
+  // Returns { kind: 'room'|'bubble', roomId, applianceId?, deviceId? } or null.
+  _pickHit(e) {
     const rect = this.canvas3D.getBoundingClientRect();
     this.pointer.x = ((e.clientX - rect.left) / rect.width)  *  2 - 1;
     this.pointer.y = ((e.clientY - rect.top)  / rect.height) * -2 + 1;
@@ -392,8 +546,14 @@ export class Floorplan {
     const intersects = this.raycaster.intersectObjects(this.roomGroup.children, true);
     for (const i of intersects) {
       let n = i.object;
-      while (n && !n.userData.roomId) n = n.parent;
-      if (n) return n.userData.roomId;
+      // Bubbles carry their data directly on themselves
+      if (n.userData?.isBubble) {
+        return { kind: 'bubble', roomId: n.userData.roomId,
+                 applianceId: n.userData.applianceId, deviceId: n.userData.deviceId };
+      }
+      // Otherwise walk up to find the room group
+      while (n && !n.userData?.roomId) n = n.parent;
+      if (n) return { kind: 'room', roomId: n.userData.roomId };
     }
     return null;
   }
