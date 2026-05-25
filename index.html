@@ -203,8 +203,15 @@
     <button class="primary" id="settings-save">save</button>
   </div>
 
-  <p class="dim small" style="margin-top:14px">
-    Removing factory-resets the device if this is its last appliance, or deletes just this appliance otherwise.
+  <hr>
+  <button class="ghost" id="settings-add-appliance" style="width:100%">+ Add another appliance to this device</button>
+  <p class="dim small" style="margin-top:10px">
+    One ESP32 can control multiple physical appliances (e.g. an AC and a fan in the same room). Add another remote here.
+  </p>
+
+  <hr>
+  <p class="dim small">
+    Remove will factory-reset the device if this is its last appliance, or delete just this appliance otherwise.
   </p>
 </dialog>
 
