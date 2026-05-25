@@ -136,12 +136,12 @@ export class Floorplan {
     this.controls.maxPolarAngle = Math.PI / 2.2;
     this.controls.target.set(4, 0, 4);
 
-    // lights
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+    // lights — generous ambient + neutral directional so floors look bright
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const sun = new THREE.DirectionalLight(0xffffff, 0.55);
     sun.position.set(10, 18, 8);
     this.scene.add(sun);
-    const fill = new THREE.DirectionalLight(0xb4c7ff, 0.25);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.25);
     fill.position.set(-8, 6, -8);
     this.scene.add(fill);
 
@@ -254,7 +254,7 @@ export class Floorplan {
 
     // Corridors — full floor + walls along the parallel-to-corridor edges
     const corridors = this._findCorridors(placements);
-    const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
+    const wallMat = new THREE.MeshBasicMaterial({ color: wallColor });
     for (const c of corridors) {
       const isHorizontal = c.width > c.height;     // wider than tall = side-by-side gap
       const cFloor = new THREE.Mesh(
@@ -310,24 +310,24 @@ export class Floorplan {
     floor.userData.isFloor = true;
     g.add(floor);
 
-    // Hover/selection overlay — translucent green plane just above the floor.
-    // Hidden by default; we toggle visibility in the hover/select handler.
+    // Hover/selection overlay — a translucent green VOLUME that fills the
+    // room from floor to ceiling, not a flat plane. depthWrite off so bubbles
+    // and walls still render naturally through it.
     const overlay = new THREE.Mesh(
-      new THREE.PlaneGeometry(w - 0.06, d - 0.06),
+      new THREE.BoxGeometry(w - 0.04, WALL_HEIGHT - 0.04, d - 0.04),
       new THREE.MeshBasicMaterial({
-        color: highlightColor, transparent: true, opacity: 0.25,
+        color: highlightColor, transparent: true, opacity: 0.18,
         depthWrite: false,
       })
     );
-    overlay.rotation.x = -Math.PI / 2;
-    overlay.position.set(x + w / 2, ROOM_FLOOR_Y + 0.04, z + d / 2);
+    overlay.position.set(x + w / 2, WALL_HEIGHT / 2, z + d / 2);
     overlay.visible = false;
     overlay.userData.isOverlay = true;
     g.add(overlay);
     g.userData.overlay = overlay;
 
-    // 4 walls (thin boxes). Walls are explicitly white.
-    const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
+    // 4 walls — pure white regardless of lighting direction (Basic, not Lambert)
+    const wallMat = new THREE.MeshBasicMaterial({ color: wallColor });
     const halfH = WALL_HEIGHT / 2;
     const wallN = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, WALL_THICK), wallMat);
     wallN.position.set(x + w / 2, halfH, z);
@@ -342,28 +342,30 @@ export class Floorplan {
     wallE.position.set(x + w, halfH, z + d / 2);
     g.add(wallE);
 
-    // Floating room label
+    // Floating room label — sits high above the walls so it never visually
+    // collides with the appliance bubbles below
     const sprite = this._buildLabelSprite(room);
-    sprite.position.set(x + w / 2, WALL_HEIGHT + 0.7, z + d / 2);
+    sprite.position.set(x + w / 2, WALL_HEIGHT + 1.4, z + d / 2);
     g.add(sprite);
 
     // Appliance bubbles — one per appliance in this room.
-    // Render in a horizontal arc above the room floor.
+    // Positioned LOW (just above the floor) so they're clearly below the
+    // label sprite from every camera angle. Spread side-by-side along x.
     if (this.getAppliancesForRoom) {
       const aps = this.getAppliancesForRoom(room.room_id);
       const n = aps.length;
       aps.forEach((a, i) => {
-        const t = n === 1 ? 0 : (i - (n - 1) / 2);
-        const spreadX = Math.min(w * 0.6, n * 0.7);
-        const bx = x + w / 2 + (n === 1 ? 0 : (t / Math.max(1, (n - 1) / 2)) * spreadX / 2);
-        const bz = z + d / 2 - d * 0.15;
-        const by = WALL_HEIGHT * 0.45;
+        const t = n === 1 ? 0 : (i - (n - 1) / 2) / Math.max(1, (n - 1) / 2);
+        const spreadX = Math.min(w * 0.55, 0.7 + n * 0.55);
+        const bx = x + w / 2 + t * spreadX / 2;
+        const bz = z + d / 2;
+        const by = 0.45;
         const bubble = this._buildApplianceBubble(a);
         bubble.position.set(bx, by, bz);
         bubble.userData.roomId = room.room_id;
         bubble.userData.applianceId = a.id;
         bubble.userData.deviceId = a.deviceId;
-        bubble.userData.bobOffset = i * 0.7;     // phase for the bobbing animation
+        bubble.userData.bobOffset = i * 0.7;
         bubble.userData.basePos = { x: bx, y: by, z: bz };
         g.add(bubble);
       });
@@ -428,43 +430,58 @@ export class Floorplan {
   }
 
   _buildLabelSprite(room) {
-    // Large floating sprite — readable from any reasonable camera distance.
+    // Apple-style label: large, soft, glassy, with strong but soft shadow.
     const canvas = document.createElement('canvas');
     const dpr = 2;
-    canvas.width = 768 * dpr; canvas.height = 256 * dpr;
+    canvas.width = 1024 * dpr; canvas.height = 320 * dpr;
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
 
     const cs = getComputedStyle(document.documentElement);
     const fg = cs.getPropertyValue('--ink').trim() || '#0f172a';
-    const bg = cs.getPropertyValue('--card').trim() || '#fff';
-    const stroke = cs.getPropertyValue('--line').trim() || '#e5e7eb';
 
-    ctx.font = '700 44px "Plus Jakarta Sans", sans-serif';
+    ctx.font = '700 56px "Plus Jakarta Sans", -apple-system, sans-serif';
     const iconText = room.icon || '🚪';
     const nameText = room.name || '';
     const iconWidth = ctx.measureText(iconText).width;
     const nameWidth = ctx.measureText(nameText).width;
-    const gap = 22;
+    const gap = 28;
     const tw = iconWidth + gap + nameWidth;
-    const padX = 38, padY = 22;
+    const padX = 56, padY = 30;
     const boxW = tw + padX * 2;
-    const boxH = 94;
-    const boxX = (768 - boxW) / 2;
-    const boxY = 256 / 2 - boxH / 2;
+    const boxH = 124;
+    const boxX = (1024 - boxW) / 2;
+    const boxY = 320 / 2 - boxH / 2;
+    const radius = 36;
 
-    // Subtle shadow under the pill
-    ctx.shadowColor = 'rgba(15,23,42,0.18)';
-    ctx.shadowBlur = 18;
-    ctx.shadowOffsetY = 6;
-    ctx.fillStyle = bg;
-    this._roundRect(ctx, boxX, boxY, boxW, boxH, 24);
+    // Soft drop shadow under the pill
+    ctx.shadowColor = 'rgba(15, 23, 42, 0.22)';
+    ctx.shadowBlur = 32;
+    ctx.shadowOffsetY = 12;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
+    this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
     ctx.fill();
+
+    // Reset shadow before painting decorations
     ctx.shadowColor = 'transparent';
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = 2.5;
-    this._roundRect(ctx, boxX, boxY, boxW, boxH, 24);
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+
+    // Subtle inner gradient for a slight "frosted" feel
+    const grad = ctx.createLinearGradient(0, boxY, 0, boxY + boxH);
+    grad.addColorStop(0, 'rgba(255,255,255,0.0)');
+    grad.addColorStop(1, 'rgba(15,23,42,0.04)');
+    ctx.fillStyle = grad;
+    this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
+    ctx.fill();
+
+    // Thin border line for crispness
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.10)';
+    ctx.lineWidth = 2;
+    this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
     ctx.stroke();
+
+    // Text
     ctx.fillStyle = fg;
     ctx.textBaseline = 'middle';
     ctx.fillText(iconText, boxX + padX, boxY + boxH / 2 + 2);
@@ -472,10 +489,10 @@ export class Floorplan {
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = 8;
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(4.5, 1.5, 1);
+    sprite.scale.set(5.6, 1.75, 1);
     sprite.renderOrder = 999;
     sprite.userData.isLabel = true;
     return sprite;
@@ -573,7 +590,7 @@ export class Floorplan {
   // Detect rooms that are close-but-not-touching and yield connector rects.
   _findCorridors(placements) {
     const out = [];
-    const maxGap = 2;       // corridor only drawn if rooms are within 2 units
+    const maxGap = 6;       // rooms within 6 units get connected by a corridor
     const minWidth = 0.8;   // ignore tiny slivers
     for (let i = 0; i < placements.length; i++) {
       for (let j = i + 1; j < placements.length; j++) {
