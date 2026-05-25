@@ -99,8 +99,9 @@ function applyTheme(theme) {
   if (floorplan) floorplan.setTheme(theme);
 }
 function initTheme() {
+  // Default to light. Only honour dark if the user previously chose it.
   const saved = localStorage.getItem('theme');
-  const theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  const theme = (saved === 'dark') ? 'dark' : 'light';
   applyTheme(theme);
 }
 function toggleTheme() {
@@ -277,17 +278,21 @@ function handleEvent(deviceId, ev) {
 }
 
 function cmd(type, payload = {}) {
-  if (!currentDevice) return;
-  // Block sends to offline devices, with one exception: factory_reset/delete_appliance still go through
-  // (the device may come back online and we want them queued? no — MQTT non-retained means lost.
-  //  Better: warn user that device is offline and the command was not sent.)
+  if (!currentDevice) {
+    console.warn('[cmd] no currentDevice set, dropping', type, payload);
+    return;
+  }
   const d = devices.get(currentDevice);
-  const passThrough = type === 'factory_reset' || type === 'delete_appliance';
-  if (!passThrough && !isDeviceLive(d)) {
+  // Pass-through commands work even if device is offline (the user is
+  // explicitly trying to clean things up).
+  const passThrough = new Set(['factory_reset', 'delete_appliance']);
+  if (!passThrough.has(type) && !isDeviceLive(d)) {
+    console.warn('[cmd] device offline, dropping', type, payload, { lastSeen: d?.lastSeen, online: d?.online });
     toast(`device is offline — command not sent`, 3000);
     return;
   }
   const topic = `ac-remote/users/${userSub}/devices/${currentDevice}/cmd`;
+  console.log('[cmd]', type, payload);
   mqttPublish(topic, { type, payload });
 }
 
@@ -330,9 +335,21 @@ function initFloorplan() {
           if ((a.room_id || d.room_id) === rid && a.state?.power) return true;
       return false;
     },
-    onRoomTap:    (rid) => openRoom(rid),
-    onRoomEdit:   (rid) => openRoomDialog(rid),
-    onLayoutChange: () => persistDirtyLayouts(),
+    getAppliancesForRoom: (rid) => {
+      const out = [];
+      for (const d of devices.values()) {
+        for (const a of (d.appliances || [])) {
+          if ((a.room_id || d.room_id) === rid) {
+            out.push({ ...a, deviceId: d.device_id });
+          }
+        }
+      }
+      return out;
+    },
+    onRoomTap:       (rid) => openRoom(rid),
+    onApplianceTap:  (deviceId, applianceId) => openControl(deviceId, applianceId),
+    onRoomEdit:      (rid) => openRoomDialog(rid),
+    onLayoutChange:  () => persistDirtyLayouts(),
   });
   floorplan.setTheme(document.documentElement.getAttribute('data-theme'));
 }
