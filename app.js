@@ -6,8 +6,10 @@ import {
 
 import { Floorplan } from './floorplan.js';
 
-const DEVICES_TABLE = 'ac-remote-devices';
-const ROOMS_TABLE   = 'ac-remote-rooms';
+const DEVICES_TABLE   = 'ac-remote-devices';
+const ROOMS_TABLE     = 'ac-remote-rooms';
+const SCENES_TABLE    = 'ac-remote-scenes';
+const SCHEDULES_TABLE = 'ac-remote-schedules';
 
 const cfg = window.APP_CONFIG;
 
@@ -58,13 +60,15 @@ const FAN_BUTTONS = [
 // ============================================================
 let user           = null;
 let userSub        = null;
-let rooms          = new Map();   // room_id -> room object
-let devices        = new Map();   // device_id -> device object
+let rooms          = new Map();
+let devices        = new Map();
+let scenes         = new Map();   // scene_id -> scene object
+let schedules      = new Map();   // schedule_id -> schedule object
 let currentRoomId  = null;
 let currentDevice  = null;
 let currentAppliance = null;
 let currentButtons = [];
-let homeMode       = 'view';      // 'view' (3D) | 'edit' (2D)
+let homeMode       = 'view';
 let floorplan      = null;
 
 // ============================================================
@@ -165,6 +169,9 @@ async function onGoogleCredential(resp) {
     setLoading('loading devices');
     await fetchDevices();
 
+    setLoading('loading scenes & schedules');
+    await Promise.all([fetchScenes(), fetchSchedules()]);
+
     initFloorplan();
     await autoPlaceOrphanRooms();
     // Try to return the user to whatever screen they were on before the refresh
@@ -183,7 +190,7 @@ async function onGoogleCredential(resp) {
 
 document.getElementById('logout-btn').onclick = () => {
   mqttDisconnect();
-  rooms.clear(); devices.clear();
+  clearAllUserData();
   userSub = null; user = null;
   sessionStorage.removeItem('google_id_token');
   sessionStorage.removeItem('nav');
@@ -253,6 +260,30 @@ async function fetchDevices() {
   }
 }
 
+async function fetchScenes() {
+  try {
+    const items = await dynamoQuery(SCENES_TABLE, 'user_id', userSub);
+    scenes.clear();
+    for (const it of items) scenes.set(it.scene_id, it);
+  } catch (e) {
+    console.warn('fetchScenes (table may not exist yet):', e);
+  }
+}
+async function fetchSchedules() {
+  try {
+    const items = await dynamoQuery(SCHEDULES_TABLE, 'user_id', userSub);
+    schedules.clear();
+    for (const it of items) schedules.set(it.schedule_id, it);
+  } catch (e) {
+    console.warn('fetchSchedules (table may not exist yet):', e);
+  }
+}
+
+// Logout also clears scene/schedule state.
+function clearAllUserData() {
+  rooms.clear(); devices.clear(); scenes.clear(); schedules.clear();
+}
+
 function setupSubscriptions() {
   mqttSubscribe(`ac-remote/users/${userSub}/devices/+/state`, (topic, msg) => {
     const id = topic.split('/')[4];
@@ -304,18 +335,25 @@ function cmd(type, payload = {}) {
     console.warn('[cmd] no currentDevice set, dropping', type, payload);
     return;
   }
-  const d = devices.get(currentDevice);
-  // Pass-through commands work even if device is offline (the user is
-  // explicitly trying to clean things up).
+  sendCommand(currentDevice, type, payload);
+}
+
+// Lower-level command sender for scenes/schedules — doesn't depend on currentDevice.
+function sendCommand(deviceId, type, payload = {}) {
+  if (!deviceId) {
+    console.warn('[sendCommand] no deviceId', type, payload);
+    return false;
+  }
+  const d = devices.get(deviceId);
   const passThrough = new Set(['factory_reset', 'delete_appliance']);
   if (!passThrough.has(type) && !isDeviceLive(d)) {
-    console.warn('[cmd] device offline, dropping', type, payload, { lastSeen: d?.lastSeen, online: d?.online });
-    toast(`device is offline — command not sent`, 3000);
-    return;
+    console.warn('[sendCommand] device offline, dropping', { deviceId, type, payload, lastSeen: d?.lastSeen, online: d?.online });
+    return false;
   }
-  const topic = `ac-remote/users/${userSub}/devices/${currentDevice}/cmd`;
-  console.log('[cmd]', type, payload);
+  const topic = `ac-remote/users/${userSub}/devices/${deviceId}/cmd`;
+  console.log('[sendCommand]', deviceId, type, payload);
   mqttPublish(topic, { type, payload });
+  return true;
 }
 
 // A device is "live" if it reported online recently. The DynamoDB online flag
@@ -492,9 +530,103 @@ function renderHome() {
     for (const { device, appliance } of orphans) unassigned.appendChild(applianceTile(device, appliance));
   }
 
+  renderScenes();
+  renderSchedules();
+
   if (floorplan) {
     floorplan.setMode(homeMode);
   }
+}
+
+function renderScenes() {
+  const grid = document.getElementById('scenes-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+  const list = [...scenes.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  for (const s of list) {
+    const card = document.createElement('div');
+    card.className = 'scene-card';
+    const n = (s.actions || []).length;
+    card.innerHTML = `
+      <div class="scene-icon">${s.icon || '✨'}</div>
+      <div class="scene-name">${escapeHTML(s.name)}</div>
+      <div class="scene-count">${n} action${n === 1 ? '' : 's'}</div>
+      <button class="scene-edit" data-edit="${s.scene_id}">edit</button>
+    `;
+    card.onclick = (e) => {
+      if (e.target.dataset?.edit) return;  // edit button handled separately
+      fireScene(s.scene_id);
+    };
+    card.querySelector('.scene-edit').onclick = (e) => {
+      e.stopPropagation();
+      openSceneDialog(s.scene_id);
+    };
+    grid.appendChild(card);
+  }
+  const add = document.createElement('div');
+  add.className = 'add-scene-card';
+  add.textContent = '+ new scene';
+  add.onclick = () => openSceneDialog(null);
+  grid.appendChild(add);
+}
+
+function renderSchedules() {
+  const list = document.getElementById('schedules-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const sched = [...schedules.values()].sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  if (sched.length === 0) {
+    list.innerHTML = '<p class="dim small">No schedules yet. Schedules fire even when your phone is off — see Part F of SETUP.md.</p>';
+    return;
+  }
+  const dayLetters = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  for (const s of sched) {
+    const card = document.createElement('div');
+    card.className = 'schedule-card' + (s.enabled === false ? ' disabled' : '');
+    const days = (s.days || []).map(d => dayLetters[d]).join(' · ');
+    card.innerHTML = `
+      <div class="sc-time">${escapeHTML(s.time || '--:--')}</div>
+      <div class="sc-meta">
+        <div class="sc-name">${escapeHTML(s.name || 'Unnamed')}</div>
+        <div class="sc-days">${escapeHTML(days || 'no days set')}</div>
+      </div>
+      <div class="sc-toggle ${s.enabled === false ? '' : 'on'}" data-toggle="${s.schedule_id}"></div>
+    `;
+    card.onclick = (e) => {
+      if (e.target.dataset?.toggle) {
+        toggleSchedule(s.schedule_id);
+        return;
+      }
+      openScheduleDialog(s.schedule_id);
+    };
+    list.appendChild(card);
+  }
+}
+
+async function toggleSchedule(scheduleId) {
+  const s = schedules.get(scheduleId);
+  if (!s) return;
+  s.enabled = s.enabled === false ? true : false;
+  try {
+    await dynamoPut(SCHEDULES_TABLE, s);
+    renderSchedules();
+  } catch (err) {
+    toast('toggle failed: ' + err.message, 4000);
+  }
+}
+
+// Fire a scene — execute all its actions sequentially with small delays.
+async function fireScene(sceneId) {
+  const s = scenes.get(sceneId);
+  if (!s) return;
+  let firedCount = 0, skipped = 0;
+  for (const action of (s.actions || [])) {
+    const ok = sendCommand(action.device_id, action.type, action.payload);
+    if (ok) firedCount++; else skipped++;
+    await new Promise(r => setTimeout(r, 250));  // small delay between commands
+  }
+  if (skipped) toast(`scene "${s.name}" fired (${firedCount} sent, ${skipped} skipped — offline)`, 3500);
+  else         toast(`scene "${s.name}" fired (${firedCount} action${firedCount === 1 ? '' : 's'})`);
 }
 
 // Home mode toggle (3D / 2D)
@@ -1102,3 +1234,252 @@ document.getElementById('settings-delete').onclick = async (e) => {
   currentDevice = null; currentAppliance = null;
   show('screen-home'); renderHome();
 };
+
+// ============================================================
+// 2D EDITOR TOOLBAR — pan/zoom buttons
+// ============================================================
+document.getElementById('zoom-in').onclick  = () => floorplan?.zoomIn();
+document.getElementById('zoom-out').onclick = () => floorplan?.zoomOut();
+document.getElementById('zoom-fit').onclick = () => floorplan?.fitToContent();
+
+// ============================================================
+// SCENES + SCHEDULES — dialog helpers
+// ============================================================
+//
+// An "action" is { device_id, type, payload }
+//   type 'set_ac':    payload { appliance_id, power, mode, degrees, fanspeed, protocol }
+//   type 'send_raw':  payload { appliance_id, button }
+
+const AC_MODE_OPTIONS = AC_MODES.map(m => ({ v: m.v, label: `${m.icon} ${m.label}` }));
+
+// Render the list of actions inside a scene or schedule dialog, with the
+// "remove" button wired up. `containerId` is the target DOM id.
+function renderActions(containerId, actions, onChange) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  if (actions.length === 0) {
+    container.innerHTML = '<p class="dim small">No actions yet. Tap "+ add action" to start building.</p>';
+    return;
+  }
+  actions.forEach((a, idx) => {
+    const row = document.createElement('div');
+    row.className = 'action-row';
+    const d = devices.get(a.device_id);
+    const ap = d?.appliances?.find(x => x.id === a.payload?.appliance_id);
+    let desc = `${d?.name || '(unknown device)'} → ${ap?.name || '(unknown appliance)'}`;
+    if (a.type === 'set_ac') {
+      const p = a.payload || {};
+      if (p.power === false) desc += ' · turn OFF';
+      else {
+        const m = AC_MODES.find(x => x.v === p.mode);
+        desc += ` · ON @ ${p.degrees || '?'}°C ${m?.label || ''}`;
+      }
+    } else if (a.type === 'send_raw') {
+      desc += ` · press "${a.payload?.button || '?'}"`;
+    }
+    row.innerHTML = `
+      <div class="ax-desc">${escapeHTML(desc)}</div>
+      <button class="ax-remove" title="remove">✕</button>
+    `;
+    row.querySelector('.ax-remove').onclick = (e) => {
+      e.preventDefault();
+      actions.splice(idx, 1);
+      onChange();
+    };
+    container.appendChild(row);
+  });
+}
+
+// Show a small prompt-flow to add one action: pick device → pick appliance → pick op
+async function promptAddAction() {
+  if (devices.size === 0) { toast('add a device first'); return null; }
+
+  // Step 1: pick device
+  const deviceOpts = [...devices.values()].map(d => `${d.device_id}:${d.name || d.device_id}`);
+  const deviceId = window.prompt(
+    'Pick a device by its id:\n\n' + deviceOpts.join('\n'),
+    [...devices.keys()][0]
+  );
+  if (!deviceId || !devices.get(deviceId)) return null;
+  const d = devices.get(deviceId);
+
+  // Step 2: pick appliance
+  const aps = d.appliances || [];
+  if (aps.length === 0) { toast('this device has no appliances'); return null; }
+  const apOpts = aps.map(a => `${a.id}:${a.name} (${a.type})`);
+  const apId = window.prompt(
+    'Pick an appliance:\n\n' + apOpts.join('\n'),
+    aps[0].id
+  );
+  if (!apId) return null;
+  const ap = aps.find(a => a.id === apId);
+  if (!ap) return null;
+
+  // Step 3: pick op based on appliance type
+  if (ap.type === 'ac') {
+    const power = window.confirm('Turn ON? (Cancel = turn off)');
+    if (!power) {
+      return { device_id: deviceId, type: 'set_ac',
+               payload: { appliance_id: apId, power: false, protocol: ap.state?.protocol || 16 } };
+    }
+    const degrees = parseInt(window.prompt('Temperature °C (16-30):', '24'), 10) || 24;
+    const modeStr = window.prompt('Mode: cool / heat / fan / dry / auto', 'cool') || 'cool';
+    const m = AC_MODES.find(x => x.key === modeStr.toLowerCase()) || AC_MODES[1];
+    return {
+      device_id: deviceId, type: 'set_ac',
+      payload: {
+        appliance_id: apId, power: true, protocol: ap.state?.protocol || 16,
+        mode: m.v, degrees, fanspeed: 0, swingv: 255,
+      }
+    };
+  } else {
+    // fan / generic: send a learned button
+    const btnName = window.prompt('Button name to send:', 'power');
+    if (!btnName) return null;
+    return { device_id: deviceId, type: 'send_raw',
+             payload: { appliance_id: apId, button: btnName.trim() } };
+  }
+}
+
+// ============================================================
+// SCENE DIALOG
+// ============================================================
+let editingScene = null;
+function openSceneDialog(sceneId) {
+  editingScene = sceneId ? { ...scenes.get(sceneId), actions: [...(scenes.get(sceneId).actions || [])] }
+                         : { scene_id: uid(), name: '', icon: '✨', actions: [] };
+  document.getElementById('scene-dialog-title').textContent = sceneId ? 'Edit scene' : 'New scene';
+  document.getElementById('scene-delete').style.display = sceneId ? '' : 'none';
+  document.getElementById('scene-name').value = editingScene.name || '';
+  document.querySelectorAll('#scene-icon-picker button').forEach(b => {
+    b.classList.toggle('selected', b.dataset.icon === (editingScene.icon || '✨'));
+    b.onclick = (e) => {
+      e.preventDefault();
+      document.querySelectorAll('#scene-icon-picker button').forEach(x => x.classList.remove('selected'));
+      b.classList.add('selected');
+      editingScene.icon = b.dataset.icon;
+    };
+  });
+  renderActions('scene-actions', editingScene.actions, () => renderActions('scene-actions', editingScene.actions, () => {}));
+  document.getElementById('scene-dialog').showModal();
+}
+document.getElementById('scene-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('scene-dialog').close(); };
+document.getElementById('scene-add-action').onclick = async (e) => {
+  e.preventDefault();
+  const a = await promptAddAction();
+  if (!a) return;
+  editingScene.actions.push(a);
+  renderActions('scene-actions', editingScene.actions, () => renderActions('scene-actions', editingScene.actions, () => {}));
+};
+document.getElementById('scene-save').onclick = async (e) => {
+  e.preventDefault();
+  editingScene.name = document.getElementById('scene-name').value.trim();
+  if (!editingScene.name) { toast('name the scene'); return; }
+  const item = {
+    user_id: userSub,
+    scene_id: editingScene.scene_id,
+    name: editingScene.name,
+    icon: editingScene.icon || '✨',
+    actions: editingScene.actions || [],
+  };
+  try {
+    await dynamoPut(SCENES_TABLE, item);
+    scenes.set(item.scene_id, item);
+    document.getElementById('scene-dialog').close();
+    renderScenes();
+    toast('scene saved');
+  } catch (err) {
+    toast('save failed: ' + err.message, 4000);
+  }
+};
+document.getElementById('scene-delete').onclick = async (e) => {
+  e.preventDefault();
+  if (!confirm('Delete this scene?')) return;
+  try {
+    await dynamoDelete(SCENES_TABLE, 'user_id', userSub, 'scene_id', editingScene.scene_id);
+    scenes.delete(editingScene.scene_id);
+    document.getElementById('scene-dialog').close();
+    renderScenes();
+  } catch (err) {
+    toast('delete failed: ' + err.message, 4000);
+  }
+};
+document.getElementById('add-scene-btn').onclick = () => openSceneDialog(null);
+
+// ============================================================
+// SCHEDULE DIALOG
+// ============================================================
+let editingSchedule = null;
+function openScheduleDialog(scheduleId) {
+  editingSchedule = scheduleId
+    ? { ...schedules.get(scheduleId), actions: [...(schedules.get(scheduleId).actions || [])], days: [...(schedules.get(scheduleId).days || [])] }
+    : { schedule_id: uid(), name: '', time: '07:00', days: [1,2,3,4,5], enabled: true, actions: [], timezone: 'Asia/Singapore' };
+  document.getElementById('schedule-dialog-title').textContent = scheduleId ? 'Edit schedule' : 'New schedule';
+  document.getElementById('schedule-delete').style.display = scheduleId ? '' : 'none';
+  document.getElementById('schedule-name').value = editingSchedule.name || '';
+  document.getElementById('schedule-time').value = editingSchedule.time || '07:00';
+  document.getElementById('schedule-enabled').checked = editingSchedule.enabled !== false;
+  document.querySelectorAll('#schedule-days button').forEach(b => {
+    const d = Number(b.dataset.day);
+    b.classList.toggle('selected', editingSchedule.days.includes(d));
+    b.onclick = (e) => {
+      e.preventDefault();
+      const i = editingSchedule.days.indexOf(d);
+      if (i >= 0) editingSchedule.days.splice(i, 1);
+      else        editingSchedule.days.push(d);
+      b.classList.toggle('selected');
+    };
+  });
+  renderActions('schedule-actions', editingSchedule.actions, () => renderActions('schedule-actions', editingSchedule.actions, () => {}));
+  document.getElementById('schedule-dialog').showModal();
+}
+document.getElementById('schedule-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('schedule-dialog').close(); };
+document.getElementById('schedule-add-action').onclick = async (e) => {
+  e.preventDefault();
+  const a = await promptAddAction();
+  if (!a) return;
+  editingSchedule.actions.push(a);
+  renderActions('schedule-actions', editingSchedule.actions, () => renderActions('schedule-actions', editingSchedule.actions, () => {}));
+};
+document.getElementById('schedule-save').onclick = async (e) => {
+  e.preventDefault();
+  editingSchedule.name = document.getElementById('schedule-name').value.trim();
+  editingSchedule.time = document.getElementById('schedule-time').value;
+  editingSchedule.enabled = document.getElementById('schedule-enabled').checked;
+  if (!editingSchedule.name) { toast('name the schedule'); return; }
+  if (!editingSchedule.time) { toast('set a time'); return; }
+  if (editingSchedule.days.length === 0) { toast('pick at least one day'); return; }
+  if (editingSchedule.actions.length === 0) { toast('add at least one action'); return; }
+  const item = {
+    user_id: userSub,
+    schedule_id: editingSchedule.schedule_id,
+    name:     editingSchedule.name,
+    time:     editingSchedule.time,
+    days:     editingSchedule.days,
+    enabled:  editingSchedule.enabled,
+    actions:  editingSchedule.actions,
+    timezone: editingSchedule.timezone || 'Asia/Singapore',
+  };
+  try {
+    await dynamoPut(SCHEDULES_TABLE, item);
+    schedules.set(item.schedule_id, item);
+    document.getElementById('schedule-dialog').close();
+    renderSchedules();
+    toast('schedule saved');
+  } catch (err) {
+    toast('save failed: ' + err.message + ' (check that ac-remote-schedules table exists and IAM is updated)', 5000);
+  }
+};
+document.getElementById('schedule-delete').onclick = async (e) => {
+  e.preventDefault();
+  if (!confirm('Delete this schedule?')) return;
+  try {
+    await dynamoDelete(SCHEDULES_TABLE, 'user_id', userSub, 'schedule_id', editingSchedule.schedule_id);
+    schedules.delete(editingSchedule.schedule_id);
+    document.getElementById('schedule-dialog').close();
+    renderSchedules();
+  } catch (err) {
+    toast('delete failed: ' + err.message, 4000);
+  }
+};
+document.getElementById('add-schedule-btn').onclick = () => openScheduleDialog(null);
