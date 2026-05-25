@@ -66,7 +66,7 @@ let currentButtons = [];          // learned button names for currentAppliance
 // ============================================================
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
-  document.getElementById(id).style.display = '';
+  document.getElementById(id).style.display = 'block';
 }
 function setLoading(msg) {
   document.getElementById('loading-msg').textContent = msg || 'loading…';
