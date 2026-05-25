@@ -346,6 +346,14 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
   background-size: 40px 40px;
   background-position: -1px -1px;
   cursor: crosshair;
+  touch-action: none;
+}
+.fp-corridor {
+  fill: color-mix(in srgb, var(--ink-2) 12%, transparent);
+  stroke: color-mix(in srgb, var(--ink-2) 30%, transparent);
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
 }
 .fp-edit-room {
   fill: color-mix(in srgb, var(--primary) 15%, transparent);
@@ -356,6 +364,7 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
 }
 .fp-edit-room.selected {
   fill: color-mix(in srgb, var(--primary) 28%, transparent);
+  stroke-width: 3;
 }
 .fp-room-label {
   fill: var(--ink);
@@ -365,15 +374,15 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
   user-select: none;
 }
 .fp-room-icon {
-  font-size: 22px;
+  font-size: 28px;
   pointer-events: none;
   user-select: none;
 }
 .fp-handle {
   fill: var(--bg-elevated);
   stroke: var(--primary);
-  stroke-width: 2;
-  cursor: nwse-resize;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15));
 }
 .editor-toolbar {
   position: absolute; bottom: 14px; left: 14px; right: 14px;
@@ -449,6 +458,34 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
 .appliance-tile .ap-online.on {
   background: var(--success);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 25%, transparent);
+}
+.appliance-tile.offline {
+  opacity: 0.78;
+  background: var(--bg-sunken);
+}
+.appliance-tile.offline .ap-icon { filter: grayscale(0.7); }
+.appliance-tile.offline .ap-state { color: var(--warning); font-weight: 600; }
+
+/* ============================ offline banner ============================ */
+.offline-banner {
+  display: flex; align-items: flex-start; gap: 12px;
+  background: color-mix(in srgb, var(--warning) 14%, var(--card));
+  border: 1.5px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: 14px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  color: var(--ink);
+}
+.offline-banner strong { display: block; margin-bottom: 4px; font-size: 14px; }
+.offline-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--warning);
+  flex-shrink: 0; margin-top: 5px;
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 50%, transparent); }
+  50%      { box-shadow: 0 0 0 10px color-mix(in srgb, var(--warning) 0%, transparent); }
 }
 
 /* ============================ AC remote ============================ */
