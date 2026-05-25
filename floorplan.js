@@ -11,6 +11,25 @@ const WALL_HEIGHT  = 1.5;
 const WALL_THICK   = 0.12;
 const ROOM_FLOOR_Y = 0;
 
+// Cartoon-y but professional wall colors — soft pastels keyed off the room icon.
+// Floors stay neutral; walls give each room its personality.
+const ICON_WALL_PALETTE = {
+  '🛋️': { wall: '#f0d9c4', floor: '#f5ecdf' },  // warm peach — Living Room
+  '🛏️': { wall: '#cbc5e3', floor: '#ece9f5' },  // soft lavender — Bedroom
+  '🍳': { wall: '#cfe6d2', floor: '#ecf4ed' },  // soft mint — Kitchen
+  '🛁': { wall: '#c4dde6', floor: '#e5eff4' },  // soft cyan — Bathroom
+  '🚪': { wall: '#e3d6c0', floor: '#f3ede0' },  // soft beige — Hallway
+  '💼': { wall: '#c8d2e0', floor: '#e8edf3' },  // soft slate — Office
+  '🎮': { wall: '#d8c4e6', floor: '#efe6f4' },  // soft violet — Game Room
+  '📚': { wall: '#e0d2b8', floor: '#f0eada' },  // soft tan — Study
+  '🪴': { wall: '#cbe2c0', floor: '#eaf2e3' },  // soft green — Balcony
+};
+const DEFAULT_PALETTE = { wall: '#e0e6ed', floor: '#f3f5f9' };
+
+function paletteForRoom(room) {
+  return ICON_WALL_PALETTE[room.icon] || DEFAULT_PALETTE;
+}
+
 export class Floorplan {
   constructor({
     container3D, container2D, canvas3D, svg2D, tooltip3D,
@@ -58,6 +77,8 @@ export class Floorplan {
       this.container3D.style.display = 'none';
       this.container2D.style.display = '';
       this.refresh();
+      // Fit content into the available viewport when entering edit mode
+      requestAnimationFrame(() => this.fitToContent());
     }
   }
 
@@ -220,11 +241,8 @@ export class Floorplan {
         }
       });
     }
-    this._roomMeshes = new Map();   // roomId -> Group
+    this._roomMeshes = new Map();
     const cs = getComputedStyle(document.documentElement);
-    const floorColor    = new THREE.Color(cs.getPropertyValue('--scene-floor').trim() || '#fff');
-    const wallColor     = new THREE.Color(cs.getPropertyValue('--scene-wall').trim()  || '#ffffff');
-    const wallEdgeColor = new THREE.Color(cs.getPropertyValue('--scene-wall-edge').trim() || '#e2e7f0');
     const activeColor   = new THREE.Color(cs.getPropertyValue('--scene-room-on').trim() || '#dbeafe');
     const highlightColor= new THREE.Color(cs.getPropertyValue('--scene-highlight').trim() || '#34d399');
 
@@ -236,10 +254,7 @@ export class Floorplan {
       if (!fp) continue;
       placements.push(fp);
       const isActive = this.isRoomActive ? this.isRoomActive(room.room_id) : false;
-      const group = this._buildRoomMesh(room, fp, {
-        floorColor: isActive ? activeColor : floorColor,
-        wallColor, wallEdgeColor, isActive, highlightColor,
-      });
+      const group = this._buildRoomMesh(room, fp, { isActive, highlightColor, activeColor });
       group.userData.roomId = room.room_id;
       this.roomGroup.add(group);
       this._roomMeshes.set(room.room_id, group);
@@ -252,32 +267,31 @@ export class Floorplan {
       }
     }
 
-    // Corridors — full floor + walls along the parallel-to-corridor edges
+    // Corridors — neutral cream walls + floor (consistent across all corridors)
     const corridors = this._findCorridors(placements);
-    const wallMat = new THREE.MeshBasicMaterial({ color: wallColor });
+    const corrWallMat  = new THREE.MeshLambertMaterial({ color: 0xe0d6c0 });
+    const corrFloorMat = new THREE.MeshLambertMaterial({ color: 0xf3ede0 });
     for (const c of corridors) {
-      const isHorizontal = c.width > c.height;     // wider than tall = side-by-side gap
+      const isHorizontal = c.width > c.height;
       const cFloor = new THREE.Mesh(
         new THREE.BoxGeometry(c.width, 0.05, c.height),
-        new THREE.MeshLambertMaterial({ color: floorColor })
+        corrFloorMat
       );
       cFloor.position.set(c.x + c.width / 2, ROOM_FLOOR_Y, c.y + c.height / 2);
       this.roomGroup.add(cFloor);
       const halfH = WALL_HEIGHT / 2;
       if (isHorizontal) {
-        // Vertical-axis corridor (rooms stacked) — walls run along the corridor's length (x-axis)
-        const wallTop = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), wallMat.clone());
+        const wallTop = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), corrWallMat);
         wallTop.position.set(c.x + c.width / 2, halfH, c.y);
         this.roomGroup.add(wallTop);
-        const wallBot = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), wallMat.clone());
+        const wallBot = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), corrWallMat);
         wallBot.position.set(c.x + c.width / 2, halfH, c.y + c.height);
         this.roomGroup.add(wallBot);
       } else {
-        // Horizontal-axis corridor (rooms side-by-side) — walls run along z-axis
-        const wallL = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), wallMat.clone());
+        const wallL = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), corrWallMat);
         wallL.position.set(c.x, halfH, c.y + c.height / 2);
         this.roomGroup.add(wallL);
-        const wallR = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), wallMat.clone());
+        const wallR = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), corrWallMat);
         wallR.position.set(c.x + c.width, halfH, c.y + c.height / 2);
         this.roomGroup.add(wallR);
       }
@@ -297,9 +311,12 @@ export class Floorplan {
     if (emptyEl) emptyEl.style.display = (rooms.filter(r => r.floor_plan).length === 0) ? '' : 'none';
   }
 
-  _buildRoomMesh(room, fp, { floorColor, wallColor, wallEdgeColor, isActive, highlightColor }) {
+  _buildRoomMesh(room, fp, { isActive, highlightColor, activeColor }) {
     const g = new THREE.Group();
     const w = fp.width, d = fp.height, x = fp.x, z = fp.y;
+    const pal = paletteForRoom(room);
+    const wallColor  = new THREE.Color(pal.wall);
+    const floorColor = new THREE.Color(isActive ? activeColor.getHexString() : pal.floor);
 
     // Floor
     const floor = new THREE.Mesh(
@@ -310,9 +327,7 @@ export class Floorplan {
     floor.userData.isFloor = true;
     g.add(floor);
 
-    // Hover/selection overlay — a translucent green VOLUME that fills the
-    // room from floor to ceiling, not a flat plane. depthWrite off so bubbles
-    // and walls still render naturally through it.
+    // Hover/selection overlay — translucent green VOLUME (full room from floor to ceiling).
     const overlay = new THREE.Mesh(
       new THREE.BoxGeometry(w - 0.04, WALL_HEIGHT - 0.04, d - 0.04),
       new THREE.MeshBasicMaterial({
@@ -326,8 +341,8 @@ export class Floorplan {
     g.add(overlay);
     g.userData.overlay = overlay;
 
-    // 4 walls — pure white regardless of lighting direction (Basic, not Lambert)
-    const wallMat = new THREE.MeshBasicMaterial({ color: wallColor });
+    // 4 walls — Lambert so there's gentle shading without looking flat or sterile.
+    const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
     const halfH = WALL_HEIGHT / 2;
     const wallN = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, WALL_THICK), wallMat);
     wallN.position.set(x + w / 2, halfH, z);
@@ -342,15 +357,12 @@ export class Floorplan {
     wallE.position.set(x + w, halfH, z + d / 2);
     g.add(wallE);
 
-    // Floating room label — sits high above the walls so it never visually
-    // collides with the appliance bubbles below
+    // Label well above the walls — no overlap with bubbles
     const sprite = this._buildLabelSprite(room);
     sprite.position.set(x + w / 2, WALL_HEIGHT + 1.4, z + d / 2);
     g.add(sprite);
 
-    // Appliance bubbles — one per appliance in this room.
-    // Positioned LOW (just above the floor) so they're clearly below the
-    // label sprite from every camera angle. Spread side-by-side along x.
+    // Appliance bubbles
     if (this.getAppliancesForRoom) {
       const aps = this.getAppliancesForRoom(room.room_id);
       const n = aps.length;
@@ -576,49 +588,111 @@ export class Floorplan {
   }
 
   // =============================================================
-  // 2D — SVG editor
+  // 2D — SVG editor (with pan + zoom)
   // =============================================================
   _init2D() {
-    // touch-action prevents the browser from interpreting the drag as scroll
+    this.viewBox = { x: 0, y: 0, w: SCENE_W, h: SCENE_H };
+    this.svg2D.setAttribute('viewBox', `0 0 ${SCENE_W} ${SCENE_H}`);
     this.svg2D.style.touchAction = 'none';
-    this.svg2D.addEventListener('pointerdown', (e) => this._onSvgPointerDown(e));
-    this.svg2D.addEventListener('pointermove', (e) => this._onSvgPointerMove(e));
-    this.svg2D.addEventListener('pointerup',   (e) => this._onSvgPointerUp(e));
+    this.svg2D.addEventListener('pointerdown',  (e) => this._onSvgPointerDown(e));
+    this.svg2D.addEventListener('pointermove',  (e) => this._onSvgPointerMove(e));
+    this.svg2D.addEventListener('pointerup',    (e) => this._onSvgPointerUp(e));
     this.svg2D.addEventListener('pointercancel',(e) => this._onSvgPointerUp(e));
+    this.svg2D.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+      this._zoom(factor, { x: e.offsetX, y: e.offsetY });
+    }, { passive: false });
+  }
+
+  // Public — called from toolbar buttons
+  zoomIn()  { this._zoom(0.8); }
+  zoomOut() { this._zoom(1.25); }
+  fitToContent() {
+    const all = this._getAllPlacements();
+    if (all.length === 0) {
+      this._setViewBox({ x: 0, y: 0, w: SCENE_W, h: SCENE_H });
+      return;
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of all) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + p.width);
+      maxY = Math.max(maxY, p.y + p.height);
+    }
+    // Generous padding so users can grab and drag without rooms hitting edges
+    const padX = (maxX - minX) * 0.3 + 2;
+    const padY = (maxY - minY) * 0.3 + 2;
+    minX -= padX; minY -= padY;
+    maxX += padX; maxY += padY;
+    const contentW = (maxX - minX) * UNIT_PX;
+    const contentH = (maxY - minY) * UNIT_PX;
+    const rect = this.svg2D.getBoundingClientRect();
+    const aspect = rect.width / Math.max(1, rect.height);
+    let finalW = contentW, finalH = contentH;
+    if (contentW / contentH > aspect) finalH = contentW / aspect;
+    else                              finalW = contentH * aspect;
+    const cxPx = (minX + maxX) / 2 * UNIT_PX;
+    const cyPx = (minY + maxY) / 2 * UNIT_PX;
+    this._setViewBox({ x: cxPx - finalW / 2, y: cyPx - finalH / 2, w: finalW, h: finalH });
+  }
+
+  _setViewBox(vb) {
+    // Clamp zoom in/out
+    const minW = SCENE_W * 0.2;
+    const maxW = SCENE_W * 8;
+    if (vb.w < minW) { const r = minW / vb.w; vb.w *= r; vb.h *= r; }
+    if (vb.w > maxW) { const r = maxW / vb.w; vb.w *= r; vb.h *= r; }
+    this.viewBox = vb;
+    this.svg2D.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+  }
+
+  _zoom(factor, focusPx) {
+    const vb = this.viewBox;
+    const newW = vb.w * factor;
+    const newH = vb.h * factor;
+    let newX, newY;
+    if (focusPx) {
+      const rect = this.svg2D.getBoundingClientRect();
+      const fx = vb.x + (focusPx.x / rect.width)  * vb.w;
+      const fy = vb.y + (focusPx.y / rect.height) * vb.h;
+      newX = fx - (focusPx.x / rect.width)  * newW;
+      newY = fy - (focusPx.y / rect.height) * newH;
+    } else {
+      newX = vb.x + (vb.w - newW) / 2;
+      newY = vb.y + (vb.h - newH) / 2;
+    }
+    this._setViewBox({ x: newX, y: newY, w: newW, h: newH });
   }
 
   // Detect rooms that are close-but-not-touching and yield connector rects.
   _findCorridors(placements) {
     const out = [];
-    const maxGap = 6;       // rooms within 6 units get connected by a corridor
-    const minWidth = 0.8;   // ignore tiny slivers
+    const maxGap = 6;
+    const minWidth = 0.8;
     for (let i = 0; i < placements.length; i++) {
       for (let j = i + 1; j < placements.length; j++) {
         const a = placements[i], b = placements[j];
-        // Try vertical corridor (rooms above/below, x-ranges overlap)
         const xStart = Math.max(a.x, b.x);
         const xEnd   = Math.min(a.x + a.width, b.x + b.width);
         const xOverlap = xEnd - xStart;
         if (xOverlap >= minWidth) {
           const aBottom = a.y + a.height, bBottom = b.y + b.height;
           if (aBottom < b.y && b.y - aBottom <= maxGap && b.y - aBottom > 0.01) {
-            out.push({ x: xStart, y: aBottom, width: xOverlap, height: b.y - aBottom });
-            continue;
+            out.push({ x: xStart, y: aBottom, width: xOverlap, height: b.y - aBottom }); continue;
           }
           if (bBottom < a.y && a.y - bBottom <= maxGap && a.y - bBottom > 0.01) {
-            out.push({ x: xStart, y: bBottom, width: xOverlap, height: a.y - bBottom });
-            continue;
+            out.push({ x: xStart, y: bBottom, width: xOverlap, height: a.y - bBottom }); continue;
           }
         }
-        // Try horizontal corridor (rooms left/right, y-ranges overlap)
         const yStart = Math.max(a.y, b.y);
         const yEnd   = Math.min(a.y + a.height, b.y + b.height);
         const yOverlap = yEnd - yStart;
         if (yOverlap >= minWidth) {
           const aRight = a.x + a.width, bRight = b.x + b.width;
           if (aRight < b.x && b.x - aRight <= maxGap && b.x - aRight > 0.01) {
-            out.push({ x: aRight, y: yStart, width: b.x - aRight, height: yOverlap });
-            continue;
+            out.push({ x: aRight, y: yStart, width: b.x - aRight, height: yOverlap }); continue;
           }
           if (bRight < a.x && a.x - bRight <= maxGap && a.x - bRight > 0.01) {
             out.push({ x: bRight, y: yStart, width: a.x - bRight, height: yOverlap });
@@ -638,20 +712,16 @@ export class Floorplan {
       const fp = this.layout.get(room.room_id) || room.floor_plan;
       if (fp) placements.push(fp);
     }
-
-    // Corridors first so rooms render on top
     const corridors = this._findCorridors(placements);
     for (const c of corridors) {
       const rect = document.createElementNS(ns, 'rect');
-      rect.setAttribute('x', c.x * UNIT_PX);
-      rect.setAttribute('y', c.y * UNIT_PX);
-      rect.setAttribute('width',  c.width * UNIT_PX);
+      rect.setAttribute('x', c.x * UNIT_PX); rect.setAttribute('y', c.y * UNIT_PX);
+      rect.setAttribute('width',  c.width  * UNIT_PX);
       rect.setAttribute('height', c.height * UNIT_PX);
       rect.setAttribute('rx', 4);
       rect.classList.add('fp-corridor');
       this.svg2D.appendChild(rect);
     }
-
     for (const room of rooms) {
       const fp = this.layout.get(room.room_id) || room.floor_plan;
       if (!fp) continue;
@@ -663,6 +733,7 @@ export class Floorplan {
     const ns = 'http://www.w3.org/2000/svg';
     const x = fp.x * UNIT_PX, y = fp.y * UNIT_PX;
     const w = fp.width * UNIT_PX, h = fp.height * UNIT_PX;
+    const pal = paletteForRoom(room);
 
     const g = document.createElementNS(ns, 'g');
     g.dataset.roomId = room.room_id;
@@ -672,6 +743,8 @@ export class Floorplan {
     rect.setAttribute('x', 0); rect.setAttribute('y', 0);
     rect.setAttribute('width', w); rect.setAttribute('height', h);
     rect.setAttribute('rx', 8);
+    rect.setAttribute('fill', pal.wall);
+    rect.setAttribute('fill-opacity', '0.55');
     rect.classList.add('fp-edit-room');
     rect.dataset.role = 'body';
     if (this.selectedRoomId === room.room_id) rect.classList.add('selected');
@@ -679,7 +752,6 @@ export class Floorplan {
     rect.dataset.action = 'move';
     g.appendChild(rect);
 
-    // Icon and label inside, centered
     const icon = document.createElementNS(ns, 'text');
     icon.setAttribute('x', w / 2); icon.setAttribute('y', h / 2 - 10);
     icon.setAttribute('text-anchor', 'middle');
@@ -696,7 +768,6 @@ export class Floorplan {
     label.textContent = room.name;
     g.appendChild(label);
 
-    // Resize handles — bigger hit area for fingers
     if (this.selectedRoomId === room.room_id) {
       const handles = [
         { x: 0, y: 0, action: 'resize-tl' },
@@ -705,7 +776,6 @@ export class Floorplan {
         { x: w, y: h, action: 'resize-br' },
       ];
       for (const hp of handles) {
-        // Invisible big hit area
         const hit = document.createElementNS(ns, 'circle');
         hit.setAttribute('cx', hp.x); hit.setAttribute('cy', hp.y);
         hit.setAttribute('r', 18);
@@ -714,7 +784,6 @@ export class Floorplan {
         hit.dataset.roomId = room.room_id;
         hit.dataset.action = hp.action;
         g.appendChild(hit);
-        // Visible handle
         const c = document.createElementNS(ns, 'circle');
         c.setAttribute('cx', hp.x); c.setAttribute('cy', hp.y);
         c.setAttribute('r', 9);
@@ -728,7 +797,6 @@ export class Floorplan {
     this.svg2D.appendChild(g);
   }
 
-  // Update only the dragged room's existing DOM nodes — no rebuild during drag
   _updateRoomSvg(roomId, fp) {
     const g = this.svg2D.querySelector(`g[data-room-id="${roomId}"]`);
     if (!g) return;
@@ -736,15 +804,11 @@ export class Floorplan {
     const w = fp.width * UNIT_PX, h = fp.height * UNIT_PX;
     g.setAttribute('transform', `translate(${x},${y})`);
     const body = g.querySelector('[data-role="body"]');
-    if (body) {
-      body.setAttribute('width', w);
-      body.setAttribute('height', h);
-    }
+    if (body) { body.setAttribute('width', w); body.setAttribute('height', h); }
     const icon  = g.querySelector('[data-role="icon"]');
     const label = g.querySelector('[data-role="label"]');
     if (icon)  { icon.setAttribute('x',  w / 2); icon.setAttribute('y',  h / 2 - 10); }
     if (label) { label.setAttribute('x', w / 2); label.setAttribute('y', h / 2 + 22); }
-    // Handles
     const positions = {
       'handle-resize-tl': [0, 0], 'handle-resize-tr': [w, 0],
       'handle-resize-bl': [0, h], 'handle-resize-br': [w, h],
@@ -753,7 +817,6 @@ export class Floorplan {
       const c = g.querySelector(`[data-role="${role}"]`);
       if (c) { c.setAttribute('cx', cx); c.setAttribute('cy', cy); }
     }
-    // Update hit-target circles too (the transparent siblings)
     const hits = g.querySelectorAll('circle[fill="transparent"]');
     const actionOrder = ['resize-tl', 'resize-tr', 'resize-bl', 'resize-br'];
     hits.forEach((hit, i) => {
@@ -772,15 +835,20 @@ export class Floorplan {
 
   _onSvgPointerDown(e) {
     const target = e.target.closest('[data-action]');
-    const roomId = target?.dataset.roomId;
-    const action = target?.dataset.action;
     if (!target) {
-      this.selectedRoomId = null;
-      this._notifySelection();
-      this._rebuild2D();
+      // Begin pan (and tentatively deselect on release if user didn't drag)
+      this.panState = {
+        startX: e.clientX, startY: e.clientY,
+        startVB: { ...this.viewBox },
+        moved: false,
+      };
+      this.svg2D.setPointerCapture(e.pointerId);
+      e.preventDefault();
       return;
     }
     e.preventDefault();
+    const roomId = target.dataset.roomId;
+    const action = target.dataset.action;
     const wasSelected = this.selectedRoomId === roomId;
     this.selectedRoomId = roomId;
     this._notifySelection();
@@ -788,17 +856,28 @@ export class Floorplan {
     const pt = this._svgPoint(e);
     const room = this.getRooms().get(roomId);
     const fp = this.layout.get(roomId) || { ...room.floor_plan };
-    this.dragState = {
-      roomId, action,
-      startPt: pt,
-      startFp: { ...fp },
-    };
+    this.dragState = { roomId, action, startPt: pt, startFp: { ...fp } };
     this.svg2D.setPointerCapture(e.pointerId);
-    // Only rebuild if selection changed (to show handles)
     if (!wasSelected) this._rebuild2D();
   }
 
   _onSvgPointerMove(e) {
+    if (this.panState) {
+      const rect = this.svg2D.getBoundingClientRect();
+      const dx = (e.clientX - this.panState.startX);
+      const dy = (e.clientY - this.panState.startY);
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) this.panState.moved = true;
+      // Convert pixel deltas to viewBox units
+      const vbDx = -dx * (this.viewBox.w / rect.width);
+      const vbDy = -dy * (this.viewBox.h / rect.height);
+      this._setViewBox({
+        x: this.panState.startVB.x + vbDx,
+        y: this.panState.startVB.y + vbDy,
+        w: this.panState.startVB.w,
+        h: this.panState.startVB.h,
+      });
+      return;
+    }
     if (!this.dragState) return;
     e.preventDefault();
     const pt = this._svgPoint(e);
@@ -809,45 +888,52 @@ export class Floorplan {
     const minSize = 1.5;
     if (this.dragState.action === 'move') {
       nfp = { x: startFp.x + dx, y: startFp.y + dy, width: startFp.width, height: startFp.height };
-      nfp.x = Math.max(0, nfp.x);
-      nfp.y = Math.max(0, nfp.y);
     } else if (this.dragState.action === 'resize-br') {
       nfp = { x: startFp.x, y: startFp.y,
               width:  Math.max(minSize, startFp.width + dx),
               height: Math.max(minSize, startFp.height + dy) };
     } else if (this.dragState.action === 'resize-bl') {
       const nx = Math.min(startFp.x + dx, startFp.x + startFp.width - minSize);
-      nfp = { x: Math.max(0, nx), y: startFp.y,
-              width:  startFp.width + (startFp.x - Math.max(0, nx)),
+      nfp = { x: nx, y: startFp.y,
+              width:  startFp.width + (startFp.x - nx),
               height: Math.max(minSize, startFp.height + dy) };
     } else if (this.dragState.action === 'resize-tr') {
       const ny = Math.min(startFp.y + dy, startFp.y + startFp.height - minSize);
-      nfp = { x: startFp.x, y: Math.max(0, ny),
+      nfp = { x: startFp.x, y: ny,
               width:  Math.max(minSize, startFp.width + dx),
-              height: startFp.height + (startFp.y - Math.max(0, ny)) };
+              height: startFp.height + (startFp.y - ny) };
     } else if (this.dragState.action === 'resize-tl') {
       const nx = Math.min(startFp.x + dx, startFp.x + startFp.width - minSize);
       const ny = Math.min(startFp.y + dy, startFp.y + startFp.height - minSize);
-      nfp = { x: Math.max(0, nx), y: Math.max(0, ny),
-              width:  startFp.width + (startFp.x - Math.max(0, nx)),
-              height: startFp.height + (startFp.y - Math.max(0, ny)) };
+      nfp = { x: nx, y: ny,
+              width:  startFp.width + (startFp.x - nx),
+              height: startFp.height + (startFp.y - ny) };
     }
-    // Snap to half-unit grid
     nfp.x      = Math.round(nfp.x      * 2) / 2;
     nfp.y      = Math.round(nfp.y      * 2) / 2;
     nfp.width  = Math.round(nfp.width  * 2) / 2;
     nfp.height = Math.round(nfp.height * 2) / 2;
     this.layout.set(this.dragState.roomId, nfp);
-    // Smooth update: just patch the moving room's attributes, no full rebuild
     this._updateRoomSvg(this.dragState.roomId, nfp);
   }
 
   _onSvgPointerUp(e) {
+    if (this.panState) {
+      try { this.svg2D.releasePointerCapture(e.pointerId); } catch {}
+      const moved = this.panState.moved;
+      this.panState = null;
+      if (!moved) {
+        // Treat as a click on empty space → deselect
+        this.selectedRoomId = null;
+        this._notifySelection();
+        this._rebuild2D();
+      }
+      return;
+    }
     if (!this.dragState) return;
     try { this.svg2D.releasePointerCapture(e.pointerId); } catch {}
     const wasDragging = this.dragState;
     this.dragState = null;
-    // Full rebuild on release to refresh corridors and z-order
     this._rebuild2D();
     if (wasDragging) this.onLayoutChange?.();
   }
@@ -860,6 +946,6 @@ export class Floorplan {
   }
 
   getSelectedRoomId() { return this.selectedRoomId; }
-  selectRoom(id) { this.selectedRoomId = id; this._rebuild2D(); this._notifySelection(); }
-  clearSelection() { this.selectedRoomId = null; this._rebuild2D(); this._notifySelection(); }
+  selectRoom(id)      { this.selectedRoomId = id; this._rebuild2D(); this._notifySelection(); }
+  clearSelection()    { this.selectedRoomId = null; this._rebuild2D(); this._notifySelection(); }
 }
