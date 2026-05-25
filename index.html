@@ -250,6 +250,16 @@
   </p>
 
   <hr>
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px">
+    <h3 style="margin:0; font-size:15px">Schedules for this appliance</h3>
+    <button class="primary small" id="settings-add-schedule">+ add</button>
+  </div>
+  <div id="settings-schedules-list"></div>
+  <p class="dim small" style="margin-top:10px">
+    Scheduled actions fire automatically at the time you set, even when you're away.
+  </p>
+
+  <hr>
   <p class="dim small">
     Remove will factory-reset the device if this is its last appliance, or delete just this appliance otherwise.
   </p>
@@ -332,6 +342,7 @@
 
   <label>Actions to run</label>
   <div id="schedule-actions"></div>
+  <div id="schedule-action-form-host"></div>
   <button class="ghost" id="schedule-add-action" style="width:100%; margin-top:8px">+ add action</button>
 
   <div class="dialog-row" style="margin-top:18px">
@@ -343,6 +354,74 @@
   <p class="dim small" style="margin-top:14px">
     Schedules fire even when you're away — they run from the cloud, not your browser.
     Requires the schedule Lambda setup (see SETUP.md, Part F).
+  </p>
+</dialog>
+
+<!-- ================= APPLIANCE SCHEDULE DIALOG ================= -->
+<!-- Opened from the appliance settings dialog. The device + appliance are
+     already known, so the form just asks for time / days / what to do. -->
+<dialog id="appliance-schedule-dialog" class="dialog">
+  <h2 id="ash-title">Schedule</h2>
+  <p id="ash-subtitle" class="dim small"></p>
+
+  <label>Name</label>
+  <input id="ash-name" type="text" placeholder="Morning cool-down" maxlength="32" autocomplete="off">
+
+  <label>Time (24-hour)</label>
+  <input id="ash-time" type="time" value="07:00">
+
+  <label>Days of week</label>
+  <div id="ash-days" class="day-picker">
+    <button data-day="1">Mon</button>
+    <button data-day="2">Tue</button>
+    <button data-day="3">Wed</button>
+    <button data-day="4">Thu</button>
+    <button data-day="5">Fri</button>
+    <button data-day="6">Sat</button>
+    <button data-day="0">Sun</button>
+  </div>
+
+  <label>
+    <input id="ash-enabled" type="checkbox" checked style="width:auto; margin-right:8px; vertical-align:middle">
+    Enabled
+  </label>
+
+  <!-- AC: power on/off + mode/temp/fan -->
+  <div id="ash-ac-section" style="display:none">
+    <label>Action</label>
+    <div class="pill-group" style="margin-bottom:12px">
+      <button id="ash-power-off" data-power="off">Turn OFF</button>
+      <button id="ash-power-on"  data-power="on">Turn ON</button>
+    </div>
+    <div id="ash-on-params" style="display:none">
+      <label>Mode</label>
+      <select id="ash-mode"></select>
+      <label>Temperature (°C)</label>
+      <input id="ash-temp" type="number" min="16" max="30" value="24">
+      <label>Fan speed</label>
+      <select id="ash-fan"></select>
+    </div>
+  </div>
+
+  <!-- Fan / generic: pick a learned button -->
+  <div id="ash-button-section" style="display:none">
+    <label>Button to press</label>
+    <select id="ash-button">
+      <option value="">(no buttons learned yet)</option>
+    </select>
+    <p class="dim small" style="margin-top:8px">
+      If you don't see the button you want, teach it from the appliance's control screen first.
+    </p>
+  </div>
+
+  <div class="dialog-row" style="margin-top:18px">
+    <button class="ghost"   id="ash-cancel">cancel</button>
+    <button class="danger"  id="ash-delete" style="display:none">delete</button>
+    <button class="primary" id="ash-save">save schedule</button>
+  </div>
+
+  <p class="dim small" style="margin-top:14px">
+    This schedule runs even when your phone is off — it fires from the cloud.
   </p>
 </dialog>
 
