@@ -315,3 +315,166 @@ button.danger {
   max-width: 90vw; white-space: nowrap;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ============================================================ */
+/* ROOMS                                                         */
+/* ============================================================ */
+.section-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 14px; padding: 0 4px;
+}
+.section-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
+
+.rooms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 14px;
+}
+.room-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px 16px;
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s, border-color .15s;
+  display: flex; flex-direction: column; gap: 8px;
+  min-height: 120px;
+}
+.room-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--primary-soft); }
+.room-card .room-icon { font-size: 28px; line-height: 1; }
+.room-card .room-name { font-weight: 600; font-size: 15px; }
+.room-card .room-count {
+  font-size: 12px; color: var(--ink-2);
+  margin-top: auto; padding-top: 4px;
+}
+
+.add-room-card {
+  background: transparent;
+  border: 2px dashed var(--line);
+  color: var(--ink-dim);
+  display: flex; align-items: center; justify-content: center;
+  min-height: 120px; cursor: pointer; font-size: 28px;
+  border-radius: 16px;
+  transition: color .15s, border-color .15s;
+}
+.add-room-card:hover { color: var(--primary); border-color: var(--primary); }
+
+.icon-picker {
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  gap: 6px; margin-bottom: 8px;
+}
+.icon-picker button {
+  background: var(--bg-2); border: 2px solid transparent;
+  border-radius: 10px; padding: 10px;
+  font-size: 22px; cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.icon-picker button.selected { border-color: var(--primary); background: var(--primary-soft); }
+
+/* ============================================================ */
+/* APPLIANCES + DEVICE LIST                                      */
+/* ============================================================ */
+.appliance-list, .device-list {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.appliance-tile {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex; align-items: center; gap: 14px;
+  cursor: pointer;
+  transition: transform .12s, box-shadow .15s;
+}
+.appliance-tile:hover { transform: translateY(-1px); box-shadow: var(--shadow); }
+.appliance-tile .ap-icon {
+  font-size: 26px; width: 44px; height: 44px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-2); border-radius: 12px;
+}
+.appliance-tile .ap-meta { flex: 1; min-width: 0; }
+.appliance-tile .ap-name { font-weight: 600; font-size: 15px; }
+.appliance-tile .ap-state { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
+.appliance-tile .ap-online {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ink-dim);
+}
+.appliance-tile .ap-online.on { background: var(--success); }
+.appliance-tile.power-on { background: linear-gradient(135deg, var(--card) 0%, var(--primary-soft) 100%); }
+
+/* ============================================================ */
+/* FAN CONTROLS                                                  */
+/* ============================================================ */
+.fan-control {
+  display: grid; gap: 16px;
+  grid-template-columns: 1fr;
+}
+.fan-power-tile {
+  background: var(--card); border-radius: 18px; padding: 28px;
+  text-align: center; box-shadow: var(--shadow-sm);
+}
+.fan-power-tile .power-state {
+  font-size: 32px; font-weight: 700; margin-bottom: 8px;
+}
+.fan-power-tile .power-toggle {
+  background: var(--primary); color: white; border: none;
+  padding: 14px 32px; border-radius: 999px;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: background .12s;
+}
+.fan-power-tile .power-toggle.on { background: var(--success); }
+
+.fan-row {
+  display: flex; gap: 10px;
+  background: var(--card); border-radius: 18px; padding: 18px;
+  box-shadow: var(--shadow-sm);
+  align-items: center;
+}
+.fan-row > .row-label {
+  flex: 1; font-weight: 600; font-size: 14px;
+}
+.fan-row .row-buttons {
+  display: flex; gap: 8px;
+}
+.fan-row button {
+  background: var(--bg-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 10px 14px;
+  cursor: pointer; font-size: 14px; font-weight: 500;
+  min-width: 44px;
+  transition: background .12s, color .12s;
+}
+.fan-row button.active { background: var(--primary); color: white; border-color: var(--primary); }
+.fan-row button:hover:not(.active) { background: var(--primary-soft); }
+
+/* ============================================================ */
+/* GENERIC APPLIANCE — CUSTOM BUTTON GRID                         */
+/* ============================================================ */
+.custom-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.custom-btn {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 14px; padding: 18px 12px;
+  text-align: center; cursor: pointer;
+  font-size: 13px; font-weight: 500;
+  transition: transform .12s, box-shadow .15s, border-color .15s;
+  word-break: break-word;
+}
+.custom-btn:hover { transform: translateY(-1px); box-shadow: var(--shadow); border-color: var(--primary); }
+.custom-btn .btn-icon { font-size: 22px; margin-bottom: 6px; }
+
+.add-button-tile {
+  background: transparent; border: 2px dashed var(--line);
+  color: var(--ink-dim); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  min-height: 80px; border-radius: 14px; font-size: 14px;
+}
+.add-button-tile:hover { color: var(--primary); border-color: var(--primary); }
+
+.dim.center { text-align: center; padding: 40px 20px; }
+
+/* small adjustments */
+hr { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
