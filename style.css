@@ -711,6 +711,22 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
   border: 1px solid var(--line);
 }
 
+/* ============================ pairing — appliance list ============================ */
+.pair-app-row {
+  display: flex; gap: 8px; align-items: center;
+  background: var(--bg-sunken);
+  border-radius: 12px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.pair-app-row .pap-type { flex: 0 0 130px; padding: 8px 10px; font-size: 13px; }
+.pair-app-row .pap-name { flex: 1; padding: 8px 10px; font-size: 13px; }
+.pair-app-row .pap-remove {
+  background: transparent; border: none; color: var(--danger);
+  cursor: pointer; padding: 6px 10px; font-size: 16px;
+}
+.pair-app-row .pap-remove:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); border-radius: 8px; }
+
 /* ============================ AC remote ============================ */
 .ac-stage {
   max-width: 480px; margin: 0 auto;
