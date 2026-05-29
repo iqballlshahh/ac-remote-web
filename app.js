@@ -87,7 +87,15 @@ function toast(msg, ms = 2200) {
   el.textContent = msg;
   el.style.display = '';
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.style.display = 'none', ms);
+  if (ms === 0 || ms === Infinity) {
+    toast._t = null;  // sticky — caller dismisses with hideToast()
+  } else {
+    toast._t = setTimeout(() => el.style.display = 'none', ms);
+  }
+}
+function hideToast() {
+  clearTimeout(toast._t);
+  document.getElementById('toast').style.display = 'none';
 }
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function escapeHTML(s) {
@@ -309,13 +317,16 @@ function handleEvent(deviceId, ev) {
   if (!ev || !ev.type) return;
   if (ev.type === 'learn_result') {
     const r = ev.payload || {};
+    // Clear any in-flight "learning" UI state (sticky toast + pulsing button)
+    hideToast();
+    document.querySelectorAll('.fan-btn.learning').forEach(el => el.classList.remove('learning'));
     if (r.success) {
-      toast(`learned "${r.button}" (${r.edges} edges)`);
+      toast(`✓ learned "${r.button}" (${r.edges} edges)`);
       if (currentDevice === deviceId && currentAppliance?.id === r.appliance_id) {
         cmd('list_buttons', { appliance_id: currentAppliance.id });
       }
     } else {
-      toast(`learn failed: ${r.error || 'unknown'}`, 3500);
+      toast(`learn failed: ${r.error || 'unknown'} — tap again to retry`, 4000);
     }
     const dialog = document.getElementById('learn-dialog');
     if (dialog.open) dialog.close();
@@ -328,6 +339,22 @@ function handleEvent(deviceId, ev) {
   } else if (ev.type === 'delete_result') {
     cmd('list_buttons', { appliance_id: currentAppliance.id });
   }
+}
+
+// One-tap learn: name is already known (it's the button label), so skip the
+// dialog and immediately tell the device to start listening. We add a pulsing
+// visual to the tapped tile + a sticky toast telling the user what to do.
+function startQuickLearn(buttonName) {
+  if (!currentAppliance || !currentDevice) return;
+  if (!isDeviceLive(devices.get(currentDevice))) {
+    toast('device is offline — bring it online first', 3500);
+    return;
+  }
+  cmd('learn', { appliance_id: currentAppliance.id, button: buttonName });
+  // Long-lived toast that stays until learn_result arrives
+  toast(`🎯 Learning "${buttonName}" — aim your real remote at the device and press the button (12s)…`, 0);
+  // Pulse the tile being learned
+  document.querySelectorAll(`[data-fan-btn="${buttonName}"]`).forEach(el => el.classList.add('learning'));
 }
 
 function cmd(type, payload = {}) {
@@ -1031,12 +1058,13 @@ function renderFanControl(root) {
       </div>
     </div>
   `;
-  // Predefined buttons: if learned, send; if not, open learn dialog pre-filled with this name
+  // Predefined buttons: if learned, send; if not, immediately start learning
+  // (name is already known — no need for a dialog).
   root.querySelectorAll('[data-fan-btn]').forEach(el => {
     el.onclick = () => {
       const name = el.dataset.fanBtn;
       if (!learned.has(name)) {
-        openLearnDialog(name);
+        startQuickLearn(name);
         return;
       }
       cmd('send_raw', { appliance_id: currentAppliance.id, button: name });
