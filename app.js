@@ -156,9 +156,13 @@ window.addEventListener('load', () => {
 async function onGoogleCredential(resp) {
   setLoading('signing in');
   const idToken = resp.credential;
-  const claims = JSON.parse(atob(idToken.split('.')[1]));
+  let claims;
+  try { claims = JSON.parse(atob(idToken.split('.')[1])); }
+  catch { sessionStorage.removeItem('google_id_token'); show('screen-login'); return; }
   user = { name: claims.name, email: claims.email, picture: claims.picture };
 
+  // Phase 1 — federate with Cognito. A failure here means the Google token is
+  // genuinely invalid/expired, so falling back to the login screen is correct.
   try {
     const { identityId } = await signInWithGoogle(idToken);
     userSub = identityId;
@@ -166,7 +170,25 @@ async function onGoogleCredential(resp) {
     document.getElementById('user-name').textContent  = user.name;
     document.getElementById('user-email').textContent = user.email;
     document.getElementById('user-avatar').src        = user.picture;
+  } catch (err) {
+    console.error('auth failed:', err);
+    toast('sign-in failed: ' + err.message, 4000);
+    sessionStorage.removeItem('google_id_token');
+    show('screen-login');
+    return;
+  }
 
+  // Phase 2 — connect + load. Transient failures here (a flaky network on a
+  // page refresh, a slow MQTT handshake) must NOT log the user out. Keep them
+  // signed in and offer a retry instead of bouncing back to login.
+  await connectAndLoad();
+}
+
+// Connect to the broker and hydrate state. Safe to call again on retry.
+async function connectAndLoad() {
+  const retryBtn = document.getElementById('loading-retry');
+  if (retryBtn) retryBtn.style.display = 'none';
+  try {
     setLoading('connecting to cloud');
     await mqttConnect();
     setupSubscriptions();
@@ -182,17 +204,19 @@ async function onGoogleCredential(resp) {
 
     initFloorplan();
     await autoPlaceOrphanRooms();
-    // Try to return the user to whatever screen they were on before the refresh
+    // Return the user to whatever screen they were on before the refresh
     const restored = restoreNavState();
     if (!restored) {
       show('screen-home');
       renderHome();
     }
   } catch (err) {
-    console.error(err);
-    toast('sign-in failed: ' + err.message, 4000);
-    sessionStorage.removeItem('google_id_token');
-    show('screen-login');
+    console.error('connect/load failed:', err);
+    // Stay signed in — surface the error on the loading screen with a retry.
+    document.getElementById('loading-msg').textContent =
+      "couldn't reach the cloud — check your connection";
+    show('screen-loading');
+    if (retryBtn) retryBtn.style.display = '';
   }
 }
 
@@ -206,6 +230,7 @@ document.getElementById('logout-btn').onclick = () => {
   show('screen-login');
 };
 document.getElementById('theme-btn').onclick = toggleTheme;
+document.getElementById('loading-retry').onclick = () => connectAndLoad();
 
 // ============================================================
 // DATA
@@ -380,6 +405,8 @@ function sendCommand(deviceId, type, payload = {}) {
   const topic = `ac-remote/users/${userSub}/devices/${deviceId}/cmd`;
   console.log('[sendCommand]', deviceId, type, payload);
   mqttPublish(topic, { type, payload });
+  // light tactile confirmation that a command actually went out (mobile only)
+  if (navigator.vibrate) navigator.vibrate(10);
   return true;
 }
 
