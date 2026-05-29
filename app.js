@@ -980,15 +980,19 @@ function setAc(changes) {
 // ---- Fan remote ----
 function renderFanControl(root) {
   const learned = new Set(currentButtons);
-  const isPowerOn = false; // we don't actually know fan power state — display as ambiguous
-  const mainButtons = FAN_BUTTONS.slice(0, 4); // power, speed +/-, auto
-  const oscButtons  = FAN_BUTTONS.slice(4);    // 45, 90, 180
+  const isPowerOn = false;
+  const mainButtons = FAN_BUTTONS.slice(0, 4);
+  const oscButtons  = FAN_BUTTONS.slice(4);
+  // Any learned buttons that don't match a predefined fan button name — show them as extras
+  const predefinedNames = new Set(FAN_BUTTONS.map(b => b.name));
+  const customLearned = currentButtons.filter(n => !predefinedNames.has(n));
+
   root.innerHTML = `
     <div class="fan-stage">
       <div class="fan-hero ${isPowerOn ? 'on' : ''}">
         <div class="ac-mode-label">${escapeHTML(currentAppliance.name)}</div>
         <div class="fan-rotor">🌀</div>
-        <p class="dim small">Tap a button to send the learned IR code.</p>
+        <p class="dim small">Tap a button to send. Tap a locked one to teach it.</p>
       </div>
       <div class="fan-buttons">
         ${mainButtons.map(b => `
@@ -1009,16 +1013,42 @@ function renderFanControl(root) {
           `).join('')}
         </div>
       </div>
+      ${customLearned.length > 0 ? `
+        <div class="ac-row" style="margin-top:14px">
+          <div class="row-label">Custom buttons</div>
+          <div class="generic-grid" style="margin-top:0">
+            ${customLearned.map(n => `
+              <div class="generic-btn" data-custom-btn="${escapeHTML(n)}">
+                <div class="gb-icon">🔘</div>
+                <div class="gb-label">${escapeHTML(n)}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
       <div class="generic-grid" style="margin-top:14px">
-        <div class="add-button-tile" id="fan-learn-btn">+ learn a button</div>
+        <div class="add-button-tile" id="fan-learn-btn">+ learn a custom button</div>
       </div>
     </div>
   `;
+  // Predefined buttons: if learned, send; if not, open learn dialog pre-filled with this name
   root.querySelectorAll('[data-fan-btn]').forEach(el => {
     el.onclick = () => {
       const name = el.dataset.fanBtn;
-      if (!learned.has(name)) { toast(`"${name}" not learned yet — tap "learn a button" below`, 3500); return; }
+      if (!learned.has(name)) {
+        openLearnDialog(name);
+        return;
+      }
       cmd('send_raw', { appliance_id: currentAppliance.id, button: name });
+    };
+  });
+  // Custom buttons: send on click, right-click to delete
+  root.querySelectorAll('[data-custom-btn]').forEach(el => {
+    el.onclick = () => cmd('send_raw', { appliance_id: currentAppliance.id, button: el.dataset.customBtn });
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (confirm(`delete button "${el.dataset.customBtn}"?`))
+        cmd('delete_button', { appliance_id: currentAppliance.id, button: el.dataset.customBtn });
     };
   });
   document.getElementById('fan-learn-btn').onclick = () => openLearnDialog();
@@ -1063,8 +1093,8 @@ function renderGenericControl(root) {
 // ============================================================
 // LEARN DIALOG
 // ============================================================
-function openLearnDialog() {
-  document.getElementById('learn-name').value = '';
+function openLearnDialog(prefillName) {
+  document.getElementById('learn-name').value = prefillName || '';
   document.getElementById('learn-status').style.display = 'none';
   document.getElementById('learn-dialog').showModal();
 }
