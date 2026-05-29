@@ -949,8 +949,20 @@ button.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transpar
 .fan-btn:hover:not(.locked) { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--primary); }
 .fan-btn .fb-icon { font-size: 26px; margin-bottom: 6px; line-height: 1; }
 .fan-btn .fb-label { font-size: 12px; font-weight: 600; color: var(--ink-2); }
-.fan-btn.locked { opacity: .55; cursor: not-allowed; }
-.fan-btn.locked .fb-label::after { content: ' (learn)'; color: var(--warning); }
+.fan-btn.locked { opacity: .55; cursor: pointer; }
+.fan-btn.locked .fb-label::after { content: ' (tap to teach)'; color: var(--warning); font-weight: 500; }
+
+.fan-btn.learning {
+  opacity: 1;
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 18%, var(--card));
+  animation: pulse-learning 1.1s ease-in-out infinite;
+}
+.fan-btn.learning .fb-label::after { content: ' · listening…'; color: var(--warning); }
+@keyframes pulse-learning {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 55%, transparent); }
+  50%      { box-shadow: 0 0 0 12px color-mix(in srgb, var(--warning) 0%, transparent); }
+}
 
 .fan-osc {
   display: flex; gap: 10px; margin-top: 12px;
