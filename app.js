@@ -1090,7 +1090,6 @@ document.getElementById('add-device-btn').onclick = () => {
   document.getElementById('pair-name').value = '';
   document.getElementById('pair-ssid').value = '';
   document.getElementById('pair-pass').value = '';
-  document.getElementById('pair-appliance-name').value = '';
   document.getElementById('add-progress').style.display = 'none';
   const sel = document.getElementById('pair-room');
   sel.innerHTML = '<option value="">(unassigned)</option>';
@@ -1099,8 +1098,55 @@ document.getElementById('add-device-btn').onclick = () => {
     opt.value = r.room_id; opt.textContent = `${r.icon || '🚪'} ${r.name}`;
     sel.appendChild(opt);
   }
+  // Reset to a single default AC appliance and render the list builder
+  pairingAppliances = [{ id: uid(), type: 'ac', name: 'AC' }];
+  renderPairingAppliances();
   document.getElementById('add-dialog').showModal();
 };
+
+// State for the multi-appliance list inside the pair dialog
+let pairingAppliances = [];
+
+function renderPairingAppliances() {
+  const host = document.getElementById('pair-appliances-list');
+  if (!host) return;
+  host.innerHTML = '';
+  pairingAppliances.forEach((ap, idx) => {
+    const row = document.createElement('div');
+    row.className = 'pair-app-row';
+    row.innerHTML = `
+      <select class="pap-type">
+        <option value="ac"${ap.type==='ac'?' selected':''}>Air conditioner</option>
+        <option value="fan"${ap.type==='fan'?' selected':''}>Fan</option>
+        <option value="generic"${ap.type==='generic'?' selected':''}>Other</option>
+      </select>
+      <input class="pap-name" type="text" placeholder="name" maxlength="32" value="${escapeHTML(ap.name)}">
+      <button class="pap-remove" title="remove">✕</button>
+    `;
+    row.querySelector('.pap-type').onchange = (e) => { pairingAppliances[idx].type = e.target.value; };
+    row.querySelector('.pap-name').oninput  = (e) => { pairingAppliances[idx].name = e.target.value; };
+    row.querySelector('.pap-remove').onclick = (e) => {
+      e.preventDefault();
+      if (pairingAppliances.length <= 1) {
+        toast('a device needs at least one appliance'); return;
+      }
+      pairingAppliances.splice(idx, 1);
+      renderPairingAppliances();
+    };
+    host.appendChild(row);
+  });
+}
+
+document.getElementById('pair-add-appliance').onclick = (e) => {
+  e.preventDefault();
+  // Sensible defaults for the second-and-beyond appliances
+  const next = pairingAppliances.length === 0
+    ? { id: uid(), type: 'ac', name: 'AC' }
+    : { id: uid(), type: 'fan', name: '' };
+  pairingAppliances.push(next);
+  renderPairingAppliances();
+};
+
 document.getElementById('add-cancel').onclick = (e) => { e.preventDefault(); document.getElementById('add-dialog').close(); };
 document.getElementById('add-submit').onclick = async (e) => {
   e.preventDefault();
@@ -1108,9 +1154,15 @@ document.getElementById('add-submit').onclick = async (e) => {
   const ssid = document.getElementById('pair-ssid').value.trim();
   const pass = document.getElementById('pair-pass').value;
   const roomId = document.getElementById('pair-room').value || '';
-  const apType = document.getElementById('pair-appliance-type').value;
-  const apName = document.getElementById('pair-appliance-name').value.trim() || ({ ac: 'AC', fan: 'Fan', generic: 'Remote' }[apType] || 'Appliance');
+
   if (!name || !ssid) { toast('fill in device name and WiFi SSID'); return; }
+  if (pairingAppliances.length === 0) { toast('add at least one appliance'); return; }
+  // Auto-fill any blank appliance names so the firmware doesn't end up with "Appliance" entries everywhere
+  pairingAppliances.forEach(a => {
+    if (!a.name || !a.name.trim()) {
+      a.name = ({ ac: 'AC', fan: 'Fan', generic: 'Remote' })[a.type] || 'Appliance';
+    }
+  });
   if (!navigator.bluetooth) { toast('Web Bluetooth not supported in this browser', 4000); return; }
 
   const progress = document.getElementById('add-progress');
@@ -1132,7 +1184,7 @@ document.getElementById('add-submit').onclick = async (e) => {
       if (s === 'connected') {
         setTimeout(() => {
           document.getElementById('add-dialog').close();
-          toast('device paired!');
+          toast(`device paired with ${pairingAppliances.length} appliance${pairingAppliances.length === 1 ? '' : 's'}`);
           fetchDevices().then(() => { renderHome(); if (floorplan) floorplan.refresh(); });
         }, 1500);
       }
@@ -1140,7 +1192,9 @@ document.getElementById('add-submit').onclick = async (e) => {
     progressMsg.textContent = 'sending config to device…';
     const config = {
       ssid, pass, name, user_id: userSub, room_id: roomId,
-      appliances: [{ id: 'default', type: apType, name: apName, room_id: roomId }],
+      appliances: pairingAppliances.map(a => ({
+        id: a.id, type: a.type, name: a.name, room_id: roomId,
+      })),
     };
     await cfgChar.writeValue(new TextEncoder().encode(JSON.stringify(config)));
     progressMsg.textContent = 'config sent. device is connecting…';
