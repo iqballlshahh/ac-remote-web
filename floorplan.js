@@ -141,30 +141,34 @@ export class Floorplan {
       canvas: this.canvas3D, antialias: true, alpha: true,
     });
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    // Physically-pleasing output: filmic tone mapping + soft shadows.
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     this.scene = new THREE.Scene();
     this._applySceneTheme();
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
-    this.camera.position.set(8, 12, 12);
+    this.camera = new THREE.PerspectiveCamera(38, 1, 0.1, 220);
+    this.camera.position.set(9, 13, 13);
     this.camera.lookAt(4, 0, 4);
 
     this.controls = new OrbitControls(this.camera, this.canvas3D);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.minDistance = 5;
-    this.controls.maxDistance = 40;
-    this.controls.maxPolarAngle = Math.PI / 2.2;
+    this.controls.maxDistance = 44;
+    this.controls.maxPolarAngle = Math.PI / 2.15;
     this.controls.target.set(4, 0, 4);
+    // Gentle "alive" auto-rotation that pauses while the user interacts.
+    this.controls.autoRotate = true;
+    this.controls.autoRotateSpeed = 0.55;
+    this._idleTimer = null;
 
-    // lights — generous ambient + neutral directional so floors look bright
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-    const sun = new THREE.DirectionalLight(0xffffff, 0.55);
-    sun.position.set(10, 18, 8);
-    this.scene.add(sun);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.25);
-    fill.position.set(-8, 6, -8);
-    this.scene.add(fill);
+    // --- lighting rig: hemisphere bounce + key (shadow-casting) + fill + rim ---
+    this._buildLights();
 
     this.roomGroup = new THREE.Group();
     this.scene.add(this.roomGroup);
@@ -176,10 +180,13 @@ export class Floorplan {
 
     this.canvas3D.addEventListener('pointerdown', (e) => {
       this.pointerDownAt = { x: e.clientX, y: e.clientY, t: Date.now() };
+      this._suspendAutoRotate();
     });
     this.canvas3D.addEventListener('pointermove', (e) => this._onHover3D(e));
     this.canvas3D.addEventListener('pointerleave', () => this._hideTooltip());
+    this.canvas3D.addEventListener('wheel', () => this._suspendAutoRotate(), { passive: true });
     this.canvas3D.addEventListener('pointerup', (e) => {
+      this._scheduleAutoRotate();
       if (!this.pointerDownAt) return;
       const dx = e.clientX - this.pointerDownAt.x;
       const dy = e.clientY - this.pointerDownAt.y;
@@ -190,6 +197,62 @@ export class Floorplan {
     });
 
     this._animate();
+  }
+
+  _buildLights() {
+    const hemi = new THREE.HemisphereLight(0xffffff, 0xb9c4dc, 1.05);
+    hemi.position.set(0, 24, 0);
+    this.scene.add(hemi);
+
+    const key = new THREE.DirectionalLight(0xfff6ec, 2.3);
+    key.position.set(14, 22, 10);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.radius = 6;
+    key.shadow.bias = -0.0004;
+    key.shadow.normalBias = 0.025;
+    const c = key.shadow.camera;
+    c.near = 0.5; c.far = 90;
+    c.left = -32; c.right = 32; c.top = 32; c.bottom = -32;
+    c.updateProjectionMatrix();
+    this.scene.add(key);
+    this._keyLight = key;
+
+    const fill = new THREE.DirectionalLight(0xcfe0ff, 0.55);
+    fill.position.set(-12, 9, -10);
+    this.scene.add(fill);
+
+    const rim = new THREE.DirectionalLight(0xa9c0ff, 0.4);
+    rim.position.set(-6, 5, 16);
+    this.scene.add(rim);
+  }
+
+  _suspendAutoRotate() {
+    this.controls.autoRotate = false;
+    if (this._idleTimer) { clearTimeout(this._idleTimer); this._idleTimer = null; }
+  }
+  _scheduleAutoRotate() {
+    if (this._idleTimer) clearTimeout(this._idleTimer);
+    this._idleTimer = setTimeout(() => {
+      if (this.mode === 'view') this.controls.autoRotate = true;
+    }, 4500);
+  }
+
+  // Rounded-rectangle Shape centred on the origin (XY plane), for extruded slabs.
+  _roundedRectShape(w, d, r) {
+    const s = new THREE.Shape();
+    const x = -w / 2, y = -d / 2;
+    r = Math.min(r, w / 2, d / 2);
+    s.moveTo(x + r, y);
+    s.lineTo(x + w - r, y);
+    s.quadraticCurveTo(x + w, y, x + w, y + r);
+    s.lineTo(x + w, y + d - r);
+    s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
+    s.lineTo(x + r, y + d);
+    s.quadraticCurveTo(x, y + d, x, y + d - r);
+    s.lineTo(x, y + r);
+    s.quadraticCurveTo(x, y, x + r, y);
+    return s;
   }
 
   _resize3D() {
@@ -211,10 +274,19 @@ export class Floorplan {
       this.roomGroup.traverse((o) => {
         if (o.userData?.isBubble && o.userData?.basePos) {
           const ph = o.userData.bobOffset || 0;
-          o.position.y = o.userData.basePos.y + Math.sin(t * 1.6 + ph) * 0.08;
+          const bob = Math.sin(t * 1.6 + ph);
+          o.position.y = o.userData.basePos.y + bob * 0.08;
           // Subtle pulse on scale
-          const s = 0.95 + Math.sin(t * 1.6 + ph) * 0.04;
+          const s = 0.95 + bob * 0.04;
           o.scale.set(s, s, 1);
+        } else if (o.userData?.isDisc) {
+          // Contact shadow tracks the bubble overhead: as it rises the shadow
+          // shrinks + fades, as it drops the shadow grows + darkens (grounding).
+          const ph = o.userData.bobOffset || 0;
+          const bob = Math.sin(t * 1.6 + ph);
+          const ds = 1 - bob * 0.16;
+          o.scale.set(ds, ds, 1);
+          o.material.opacity = (o.userData.discBase || 0.16) * (1 - bob * 0.28);
         }
       });
       this.renderer.render(this.scene, this.camera);
@@ -225,7 +297,10 @@ export class Floorplan {
     // Read CSS variables resolved on the current document
     const cs = getComputedStyle(document.documentElement);
     const bg = cs.getPropertyValue('--scene-bg').trim() || '#e8edf5';
-    this.scene.background = new THREE.Color(bg);
+    const bgColor = new THREE.Color(bg);
+    this.scene.background = bgColor;
+    // Gentle distance fog tinted to the background gives depth without haze up close.
+    this.scene.fog = new THREE.Fog(bgColor.clone(), 34, 88);
   }
 
   _rebuild3D() {
@@ -269,32 +344,60 @@ export class Floorplan {
 
     // Corridors — neutral cream walls + floor (consistent across all corridors)
     const corridors = this._findCorridors(placements);
-    const corrWallMat  = new THREE.MeshLambertMaterial({ color: 0xe0d6c0 });
-    const corrFloorMat = new THREE.MeshLambertMaterial({ color: 0xf3ede0 });
+    const corrWallMat  = new THREE.MeshStandardMaterial({ color: 0xe6dcc6, roughness: 0.9, metalness: 0 });
+    const corrFloorMat = new THREE.MeshStandardMaterial({ color: 0xf3ede0, roughness: 0.95, metalness: 0 });
     for (const c of corridors) {
       const isHorizontal = c.width > c.height;
       const cFloor = new THREE.Mesh(
-        new THREE.BoxGeometry(c.width, 0.05, c.height),
+        new THREE.BoxGeometry(c.width, 0.06, c.height),
         corrFloorMat
       );
       cFloor.position.set(c.x + c.width / 2, ROOM_FLOOR_Y, c.y + c.height / 2);
+      cFloor.receiveShadow = true;
       this.roomGroup.add(cFloor);
       const halfH = WALL_HEIGHT / 2;
+      const addCorrWall = (gw, gd, px, pz) => {
+        const m = new THREE.Mesh(new THREE.BoxGeometry(gw, WALL_HEIGHT, gd), corrWallMat);
+        m.position.set(px, halfH, pz);
+        m.castShadow = true; m.receiveShadow = true;
+        this.roomGroup.add(m);
+      };
       if (isHorizontal) {
-        const wallTop = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), corrWallMat);
-        wallTop.position.set(c.x + c.width / 2, halfH, c.y);
-        this.roomGroup.add(wallTop);
-        const wallBot = new THREE.Mesh(new THREE.BoxGeometry(c.width, WALL_HEIGHT, WALL_THICK), corrWallMat);
-        wallBot.position.set(c.x + c.width / 2, halfH, c.y + c.height);
-        this.roomGroup.add(wallBot);
+        addCorrWall(c.width, WALL_THICK, c.x + c.width / 2, c.y);
+        addCorrWall(c.width, WALL_THICK, c.x + c.width / 2, c.y + c.height);
       } else {
-        const wallL = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), corrWallMat);
-        wallL.position.set(c.x, halfH, c.y + c.height / 2);
-        this.roomGroup.add(wallL);
-        const wallR = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, c.height), corrWallMat);
-        wallR.position.set(c.x + c.width, halfH, c.y + c.height / 2);
-        this.roomGroup.add(wallR);
+        addCorrWall(WALL_THICK, c.height, c.x, c.y + c.height / 2);
+        addCorrWall(WALL_THICK, c.height, c.x + c.width, c.y + c.height / 2);
       }
+    }
+
+    // Floating podium — a soft rounded slab beneath the whole home so the
+    // dollhouse reads as a premium physical model resting on a surface.
+    if (bbox) {
+      const pad = 1.1;
+      const pw = (bbox.maxX - bbox.minX) + pad * 2;
+      const pd = (bbox.maxZ - bbox.minZ) + pad * 2;
+      const pcx = (bbox.minX + bbox.maxX) / 2;
+      const pcz = (bbox.minZ + bbox.maxZ) / 2;
+      const isDark = (document.documentElement.getAttribute('data-theme') === 'dark');
+      const baseCol = new THREE.Color(isDark ? 0x0e1530 : 0xeef2ff);
+      const DEPTH = 0.35, BEVEL = 0.12;
+      const shape = this._roundedRectShape(pw, pd, Math.min(1.4, Math.min(pw, pd) * 0.18));
+      const slab = new THREE.ExtrudeGeometry(shape, {
+        depth: DEPTH, bevelEnabled: true, bevelThickness: BEVEL, bevelSize: BEVEL, bevelSegments: 3, curveSegments: 12,
+      });
+      // After this rotation the extrude axis runs +Y; shift the whole slab down
+      // so its top face rests just below the room floors (which sit at y≈0).
+      slab.rotateX(-Math.PI / 2);
+      slab.translate(0, -(DEPTH + BEVEL + 0.05), 0);
+      const platform = new THREE.Mesh(
+        slab,
+        new THREE.MeshStandardMaterial({ color: baseCol, roughness: 0.82, metalness: 0.04 })
+      );
+      platform.position.set(pcx, 0, pcz);
+      platform.receiveShadow = true;
+      platform.userData.isPodium = true;
+      this.roomGroup.add(platform);
     }
 
     // Recenter camera
@@ -318,12 +421,17 @@ export class Floorplan {
     const wallColor  = new THREE.Color(pal.wall);
     const floorColor = new THREE.Color(isActive ? activeColor.getHexString() : pal.floor);
 
-    // Floor
-    const floor = new THREE.Mesh(
-      new THREE.BoxGeometry(w, 0.05, d),
-      new THREE.MeshLambertMaterial({ color: floorColor })
-    );
+    // Floor — PBR so the lighting rig produces gentle gradients + receives shadows.
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: floorColor, roughness: 0.92, metalness: 0.0,
+    });
+    if (isActive) {
+      floorMat.emissive = activeColor.clone();
+      floorMat.emissiveIntensity = 0.35;
+    }
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), floorMat);
     floor.position.set(x + w / 2, ROOM_FLOOR_Y, z + d / 2);
+    floor.receiveShadow = true;
     floor.userData.isFloor = true;
     g.add(floor);
 
@@ -341,28 +449,35 @@ export class Floorplan {
     g.add(overlay);
     g.userData.overlay = overlay;
 
-    // 4 walls — Lambert so there's gentle shading without looking flat or sterile.
-    const wallMat = new THREE.MeshLambertMaterial({ color: wallColor });
+    // 4 walls + a slightly-lighter capping rail along each top edge for a
+    // crisp "architectural model" finish. Walls cast and receive shadows.
+    const wallMat = new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.88, metalness: 0.0 });
+    const capMat  = new THREE.MeshStandardMaterial({
+      color: wallColor.clone().lerp(new THREE.Color(0xffffff), 0.45), roughness: 0.7, metalness: 0.0,
+    });
     const halfH = WALL_HEIGHT / 2;
-    const wallN = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, WALL_THICK), wallMat);
-    wallN.position.set(x + w / 2, halfH, z);
-    g.add(wallN);
-    const wallS = new THREE.Mesh(new THREE.BoxGeometry(w, WALL_HEIGHT, WALL_THICK), wallMat);
-    wallS.position.set(x + w / 2, halfH, z + d);
-    g.add(wallS);
-    const wallW = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, d), wallMat);
-    wallW.position.set(x, halfH, z + d / 2);
-    g.add(wallW);
-    const wallE = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICK, WALL_HEIGHT, d), wallMat);
-    wallE.position.set(x + w, halfH, z + d / 2);
-    g.add(wallE);
+    const CAP_H = 0.06, CAP_OVER = 0.04;
+    const addWall = (gw, gd, px, pz) => {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(gw, WALL_HEIGHT, gd), wallMat);
+      wall.position.set(px, halfH, pz);
+      wall.castShadow = true; wall.receiveShadow = true;
+      g.add(wall);
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(gw + CAP_OVER, CAP_H, gd + CAP_OVER), capMat);
+      cap.position.set(px, WALL_HEIGHT + CAP_H / 2 - 0.005, pz);
+      cap.castShadow = true;
+      g.add(cap);
+    };
+    addWall(w, WALL_THICK, x + w / 2, z);          // N
+    addWall(w, WALL_THICK, x + w / 2, z + d);      // S
+    addWall(WALL_THICK, d, x, z + d / 2);          // W
+    addWall(WALL_THICK, d, x + w, z + d / 2);      // E
 
     // Label well above the walls — no overlap with bubbles
     const sprite = this._buildLabelSprite(room);
     sprite.position.set(x + w / 2, WALL_HEIGHT + 1.4, z + d / 2);
     g.add(sprite);
 
-    // Appliance bubbles
+    // Appliance bubbles (+ a soft contact-shadow disc grounding each one)
     if (this.getAppliancesForRoom) {
       const aps = this.getAppliancesForRoom(room.room_id);
       const n = aps.length;
@@ -371,7 +486,19 @@ export class Floorplan {
         const spreadX = Math.min(w * 0.55, 0.7 + n * 0.55);
         const bx = x + w / 2 + t * spreadX / 2;
         const bz = z + d / 2;
-        const by = 0.45;
+        const by = 0.5;
+
+        const disc = new THREE.Mesh(
+          new THREE.CircleGeometry(0.34, 28),
+          new THREE.MeshBasicMaterial({ color: 0x0b1020, transparent: true, opacity: 0.16, depthWrite: false })
+        );
+        disc.rotation.x = -Math.PI / 2;
+        disc.position.set(bx, ROOM_FLOOR_Y + 0.045, bz);
+        disc.userData.discBase = 0.16;
+        disc.userData.bobOffset = i * 0.7;
+        disc.userData.isDisc = true;
+        g.add(disc);
+
         const bubble = this._buildApplianceBubble(a);
         bubble.position.set(bx, by, bz);
         bubble.userData.roomId = room.room_id;
@@ -418,10 +545,15 @@ export class Floorplan {
     ctx.fillStyle = inner;
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
 
-    // Crisp ring
-    ctx.strokeStyle = isOn ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.75)';
+    // Crisp inner ring
+    ctx.strokeStyle = isOn ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.75)';
     ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+
+    // Outer accent halo — vivid when on, muted when off
+    ctx.strokeStyle = isOn ? 'rgba(96,165,250,0.85)' : 'rgba(148,163,184,0.45)';
+    ctx.lineWidth = isOn ? 4 : 2.5;
+    ctx.beginPath(); ctx.arc(cx, cy, r + 7, 0, Math.PI * 2); ctx.stroke();
 
     // Icon
     const icon = ({ ac: '❄️', fan: '🌀', generic: '🎛️' })[appliance.type] || '🎛️';
@@ -429,6 +561,13 @@ export class Floorplan {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'center';
     ctx.fillText(icon, cx, cy + 4);
+
+    // Power status dot (top-right) so on/off reads at a glance
+    const dotX = cx + r * 0.62, dotY = cy - r * 0.62;
+    ctx.beginPath(); ctx.arc(dotX, dotY, 11, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(dotX, dotY, 7, 0, Math.PI * 2);
+    ctx.fillStyle = isOn ? '#22c55e' : '#cbd5e1'; ctx.fill();
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
