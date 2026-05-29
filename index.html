@@ -173,15 +173,13 @@
   <label>Which room?</label>
   <select id="pair-room"></select>
 
-  <label>First appliance type</label>
-  <select id="pair-appliance-type">
-    <option value="ac">Air conditioner</option>
-    <option value="fan">Fan</option>
-    <option value="generic">Other (custom buttons only)</option>
-  </select>
-
-  <label>Appliance name</label>
-  <input id="pair-appliance-name" type="text" placeholder="AC" maxlength="32" autocomplete="off">
+  <label>Appliances on this device</label>
+  <div id="pair-appliances-list"></div>
+  <button class="ghost" id="pair-add-appliance" style="width:100%; margin-top:6px">+ add another appliance</button>
+  <p class="dim small" style="margin-top:6px">
+    One ESP32 can drive multiple appliances at once — e.g. the AC and a fan in the same room.
+    Just make sure all of them can see the device's IR emitter.
+  </p>
 
   <label>Home WiFi (SSID)</label>
   <input id="pair-ssid" type="text" placeholder="MyHomeWiFi" autocomplete="off">
