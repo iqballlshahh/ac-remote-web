@@ -406,8 +406,9 @@ export class Floorplan {
       const cz = (bbox.minZ + bbox.maxZ) / 2;
       this.controls.target.set(cx, 0, cz);
       const size = Math.max(bbox.maxX - bbox.minX, bbox.maxZ - bbox.minZ);
-      const dist = Math.max(8, size * 1.4);
-      this.camera.position.set(cx + dist * 0.6, dist * 0.9, cz + dist * 0.6);
+      // Pull back enough that floating room labels at the edges stay on-canvas.
+      const dist = Math.max(10, size * 1.85);
+      this.camera.position.set(cx + dist * 0.58, dist * 0.82, cz + dist * 0.58);
     }
 
     const emptyEl = document.getElementById('floorplan-3d-empty');
