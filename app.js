@@ -17,11 +17,11 @@ const cfg = window.APP_CONFIG;
 // DATA — enums mirror IRremoteESP8266
 // ============================================================
 const AC_MODES = [
-  { v: 1, key: 'auto', label: 'Auto', icon: '🔄' },
-  { v: 2, key: 'cool', label: 'Cool', icon: '❄️' },
-  { v: 4, key: 'dry',  label: 'Dry',  icon: '💧' },
-  { v: 5, key: 'fan',  label: 'Fan',  icon: '🌀' },
-  { v: 3, key: 'heat', label: 'Heat', icon: '🔥' },
+  { v: 1, key: 'auto', label: 'Auto', icon: 'auto' },
+  { v: 2, key: 'cool', label: 'Cool', icon: 'cool' },
+  { v: 4, key: 'dry',  label: 'Dry',  icon: 'dry'  },
+  { v: 5, key: 'fan',  label: 'Fan',  icon: 'wind' },
+  { v: 3, key: 'heat', label: 'Heat', icon: 'heat' },
 ];
 const AC_FANS = [
   { v: 0, label: 'Auto' },
@@ -43,16 +43,47 @@ const BRANDS = [
   { v: 55, name: 'Teco' },               { v: 57, name: 'TCL 112' },
   { v: 27, name: 'Argo' },               { v: 15, name: 'Coolix (generic)' },
 ];
-const APPLIANCE_ICONS = { ac: '❄️', fan: '🌀', generic: '🎛️' };
+
+// ---- Inline SVG icon system (Lucide-style line icons) ----
+// Crisp vector icons for the app chrome + controls. currentColor inherits the
+// element's text colour so they theme automatically. User-pickable icons
+// (rooms, scenes) stay as emoji on purpose.
+const ICON_PATHS = {
+  power:    '<line x1="12" y1="2" x2="12" y2="12"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>',
+  back:     '<path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  edit:     '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
+  home:     '<path d="M3 9.5 12 3l9 6.5V21H3z"/><path d="M9 21v-6h6v6"/>',
+  moon:     '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/>',
+  plus:     '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  minus:    '<line x1="5" y1="12" x2="19" y2="12"/>',
+  cool:     '<line x1="12" y1="2" x2="12" y2="22"/><line x1="3.3" y1="7" x2="20.7" y2="17"/><line x1="20.7" y1="7" x2="3.3" y2="17"/><path d="M9 4l3 2 3-2M9 20l3-2 3 2"/>',
+  heat:     '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.4-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.3 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  dry:      '<path d="M12 2.7l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
+  wind:     '<path d="M9.6 4.6A2 2 0 1 1 11 8H2"/><path d="M12.6 19.4A2 2 0 1 0 14 16H2"/><path d="M17.7 7.7A2.5 2.5 0 1 1 19.5 12H2"/>',
+  auto:     '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v5h-5"/>',
+  swap:     '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="M16 21l4-4-4-4"/><path d="M20 17H4"/>',
+  add:      '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  fan:      '<path d="M12 12a4 4 0 0 0 4-4 4 4 0 0 0-8 0 4 4 0 0 0 4 4z" transform="rotate(0 12 12)"/><path d="M12 12c2.5 0 5 .5 5 4a4 4 0 0 1-8 0c0-3.5 0-4 3-4z"/><path d="M12 12c-2.16 1.25-4.5 2.4-6.4-.06a4 4 0 0 1 7-3.94c-1.75 3.03-.6 3.5 -.6 4z"/><path d="M12 12c-.34-2.46-.9-5 2.4-6.36a4 4 0 0 1 4 7c-3.03-1.75-3.5-.64-6.4-.64z"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/>',
+  sliders:  '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+  osc:      '<path d="M8 9l-3 3 3 3"/><path d="M16 9l3 3-3 3"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  remote:   '<rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="1.4" fill="currentColor"/><line x1="9.5" y1="12" x2="14.5" y2="12"/><line x1="9.5" y1="15.5" x2="14.5" y2="15.5"/>',
+};
+const APPLIANCE_ICON_NAMES = { ac: 'cool', fan: 'fan', generic: 'sliders' };
+function icon(name, cls = '') {
+  const p = ICON_PATHS[name];
+  if (!p) return '';
+  return `<svg class="icon icon-${name} ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+}
 
 const FAN_BUTTONS = [
-  { name: 'power',     label: 'Power',     icon: '⏻' },
-  { name: 'speed_up',  label: 'Speed +',   icon: '＋' },
-  { name: 'speed_dn',  label: 'Speed −',   icon: '−' },
-  { name: 'auto',      label: 'Auto',      icon: '🔄' },
-  { name: 'osc_45',    label: '45°',       icon: '↔' },
-  { name: 'osc_90',    label: '90°',       icon: '↔↔' },
-  { name: 'osc_180',   label: '180°',      icon: '↔↔↔' },
+  { name: 'power',     label: 'Power',     icon: 'power' },
+  { name: 'speed_up',  label: 'Speed +',   icon: 'plus'  },
+  { name: 'speed_dn',  label: 'Speed −',   icon: 'minus' },
+  { name: 'auto',      label: 'Auto',      icon: 'auto'  },
+  { name: 'osc_45',    label: '45°',       icon: 'osc'   },
+  { name: 'osc_90',    label: '90°',       icon: 'osc'   },
+  { name: 'osc_180',   label: '180°',      icon: 'osc'   },
 ];
 
 // ============================================================
@@ -111,9 +142,9 @@ function applyTheme(theme) {
   if (floorplan) floorplan.setTheme(theme);
 }
 function initTheme() {
-  // Default to light. Only honour dark if the user previously chose it.
+  // Premium dark by default. Only honour light if the user explicitly chose it.
   const saved = localStorage.getItem('theme');
-  const theme = (saved === 'dark') ? 'dark' : 'light';
+  const theme = (saved === 'light') ? 'light' : 'dark';
   applyTheme(theme);
 }
 function toggleTheme() {
@@ -121,6 +152,33 @@ function toggleTheme() {
   applyTheme(now);
 }
 initTheme();
+
+// ============================================================
+// DEVICE (desktop vs mobile) — drives CSS layout via [data-device]
+// and the floorplan's 3D performance tier.
+// ============================================================
+function detectDevice() {
+  // Treat coarse pointers (touch) or narrow viewports as mobile. This is read
+  // by CSS ([data-device="…"]) and by floorplan.js to pick a perf tier.
+  const coarse = window.matchMedia('(pointer: coarse)').matches;
+  const narrow = window.matchMedia('(max-width: 820px)').matches;
+  const isMobile = coarse || narrow;
+  const tag = isMobile ? 'mobile' : 'desktop';
+  if (document.documentElement.getAttribute('data-device') !== tag) {
+    document.documentElement.setAttribute('data-device', tag);
+  }
+  return isMobile;
+}
+detectDevice();
+// Re-evaluate on resize/orientation change. The 3D renderer's static settings
+// (antialias/shadow map) are fixed at init, but the live preview + CSS layout
+// should still react, and the floorplan keeps its canvas sized via its own
+// resize handler.
+let _deviceResizeT = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_deviceResizeT);
+  _deviceResizeT = setTimeout(detectDevice, 150);
+});
 
 // ============================================================
 // LOGIN
@@ -661,7 +719,7 @@ function renderSchedules() {
     const a0 = s.actions?.[0];
     const dev = devices.get(a0?.device_id);
     const ap  = dev?.appliances?.find(x => x.id === a0?.payload?.appliance_id);
-    const targetLabel = ap ? `${APPLIANCE_ICONS[ap.type] || ''} ${ap.name}` : '';
+    const targetLabel = ap ? ap.name : '';
     card.innerHTML = `
       <div class="sc-time">${escapeHTML(s.time || '--:--')}</div>
       <div class="sc-meta">
@@ -891,7 +949,7 @@ function applianceTile(device, appliance) {
     summary = 'remote';
   }
   el.innerHTML = `
-    <div class="ap-icon">${APPLIANCE_ICONS[appliance.type] || '🎛️'}</div>
+    <div class="ap-icon ap-icon-${appliance.type}">${icon(APPLIANCE_ICON_NAMES[appliance.type] || 'sliders')}</div>
     <div class="ap-meta">
       <div class="ap-name">${escapeHTML(appliance.name)}</div>
       <div class="ap-state">${escapeHTML(summary)}</div>
@@ -983,12 +1041,12 @@ function renderAcControl(root) {
           </svg>
           <div class="ring-readout">
             <div class="ring-temp">${temp}<sup>°C</sup></div>
-            <div class="ring-mode">${modeObj.icon} ${escapeHTML(modeObj.label)}</div>
+            <div class="ring-mode">${icon(modeObj.icon)} ${escapeHTML(modeObj.label)}</div>
           </div>
         </div>
         <div class="ac-temp-arrows">
-          <button id="t-dn" aria-label="cooler">−</button>
-          <button id="t-up" aria-label="warmer">＋</button>
+          <button id="t-dn" aria-label="cooler">${icon('minus')}</button>
+          <button id="t-up" aria-label="warmer">${icon('plus')}</button>
         </div>
         <button class="ac-power-btn" id="ac-power">${power ? 'turn off' : 'turn on'}</button>
       </div>
@@ -997,7 +1055,7 @@ function renderAcControl(root) {
           <div class="row-label">Mode</div>
           <div class="pill-group">
             ${AC_MODES.map(m => `
-              <button data-mode-key="${m.key}" data-mode="${m.v}" class="${m.v===modeV?'active':''}">${m.icon} ${m.label}</button>
+              <button data-mode-key="${m.key}" data-mode="${m.v}" class="${m.v===modeV?'active':''}">${icon(m.icon)} ${m.label}</button>
             `).join('')}
           </div>
         </div>
@@ -1045,13 +1103,13 @@ function renderFanControl(root) {
     <div class="fan-stage">
       <div class="fan-hero ${isPowerOn ? 'on' : ''}">
         <div class="ac-mode-label">${escapeHTML(currentAppliance.name)}</div>
-        <div class="fan-rotor">🌀</div>
+        <div class="fan-rotor">${icon('fan')}</div>
         <p class="dim small">Tap a button to send. Tap a locked one to teach it.</p>
       </div>
       <div class="fan-buttons">
         ${mainButtons.map(b => `
           <div class="fan-btn ${learned.has(b.name) ? '' : 'locked'}" data-fan-btn="${b.name}">
-            <div class="fb-icon">${b.icon}</div>
+            <div class="fb-icon">${icon(b.icon)}</div>
             <div class="fb-label">${b.label}</div>
           </div>
         `).join('')}
@@ -1061,7 +1119,7 @@ function renderFanControl(root) {
         <div class="fan-osc">
           ${oscButtons.map(b => `
             <div class="fan-btn ${learned.has(b.name) ? '' : 'locked'}" data-fan-btn="${b.name}">
-              <div class="fb-icon">${b.icon}</div>
+              <div class="fb-icon">${icon(b.icon)}</div>
               <div class="fb-label">${b.label}</div>
             </div>
           `).join('')}
@@ -1073,7 +1131,7 @@ function renderFanControl(root) {
           <div class="generic-grid" style="margin-top:0">
             ${customLearned.map(n => `
               <div class="generic-btn" data-custom-btn="${escapeHTML(n)}">
-                <div class="gb-icon">🔘</div>
+                <div class="gb-icon">${icon('remote')}</div>
                 <div class="gb-label">${escapeHTML(n)}</div>
               </div>
             `).join('')}
@@ -1123,7 +1181,7 @@ function renderGenericControl(root) {
   }
   const tiles = currentButtons.map(n => `
     <div class="generic-btn" data-gen-btn="${escapeHTML(n)}">
-      <div class="gb-icon">🔘</div>
+      <div class="gb-icon">${icon('remote')}</div>
       <div class="gb-label">${escapeHTML(n)}</div>
     </div>
   `).join('');
@@ -1827,7 +1885,7 @@ function openApplianceScheduleDialog(deviceId, applianceId, scheduleId) {
     : { schedule_id: uid(), name: '', time: '07:00', days: [1,2,3,4,5], enabled: true, actions: [], timezone: 'Asia/Singapore' };
 
   document.getElementById('ash-title').textContent = scheduleId ? 'Edit schedule' : 'New schedule';
-  document.getElementById('ash-subtitle').textContent = `${APPLIANCE_ICONS[ap.type] || ''} ${ap.name}`;
+  document.getElementById('ash-subtitle').textContent = ap.name;
   document.getElementById('ash-delete').style.display = scheduleId ? '' : 'none';
   document.getElementById('ash-name').value = editingApplianceSchedule.name || '';
   document.getElementById('ash-time').value = editingApplianceSchedule.time || '07:00';
