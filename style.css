@@ -167,6 +167,17 @@ body {
 img { display: block; max-width: 100%; }
 button { font-family: inherit; cursor: pointer; }
 
+/* inline SVG icons — inherit text colour + size, align to the text baseline */
+.icon {
+  width: 1.1em; height: 1.1em;
+  display: inline-block;
+  vertical-align: -0.18em;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+}
+button .icon, a .icon { pointer-events: none; }
+
 /* keyboard focus ring — visible only for keyboard nav, never on mouse/touch */
 :focus-visible {
   outline: none;
@@ -624,11 +635,13 @@ button.danger:active { transform: scale(.97); }
   transition: background .25s, transform .2s var(--ease-spring), box-shadow .25s;
   flex-shrink: 0;
 }
+.appliance-tile .ap-icon .icon { width: 27px; height: 27px; color: var(--primary); stroke-width: 2; }
 .appliance-tile:hover .ap-icon { transform: scale(1.07) rotate(-3deg); }
 .appliance-tile.power-on .ap-icon {
   background: var(--grad-brand);
   box-shadow: var(--grad-brand-glow);
 }
+.appliance-tile.power-on .ap-icon .icon { color: #fff; }
 .appliance-tile .ap-meta { flex: 1; min-width: 0; }
 .appliance-tile .ap-name {
   font-weight: 800; font-size: 15px;
@@ -1038,7 +1051,7 @@ button.danger:active { transform: scale(.97); }
   display: flex; align-items: center; justify-content: center;
   z-index: 1;
 }
-.ac-temp-ring svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.ac-temp-ring > svg { width: 100%; height: 100%; transform: rotate(-90deg); }
 .ac-temp-ring .ring-bg {
   fill: none;
   stroke: var(--line);
@@ -1180,11 +1193,13 @@ button.danger:active { transform: scale(.97); }
   box-shadow: 0 26px 64px color-mix(in srgb, var(--fan-c) 40%, transparent);
 }
 .fan-rotor {
-  font-size: 92px; margin: 8px 0 16px 0;
-  display: inline-block;
-  filter: drop-shadow(0 8px 18px rgba(34,197,94,.4));
+  margin: 8px 0 16px 0;
+  display: inline-flex;
+  color: var(--primary);
+  filter: drop-shadow(0 8px 22px color-mix(in srgb, var(--primary) 45%, transparent));
   animation: spin 6s linear infinite;
 }
+.fan-rotor .icon { width: 86px; height: 86px; stroke-width: 1.5; }
 .fan-hero.on .fan-rotor { animation: spin 1.6s linear infinite; }
 
 .fan-buttons {
@@ -1204,7 +1219,9 @@ button.danger:active { transform: scale(.97); }
 }
 .fan-btn:hover:not(.locked) { transform: translateY(-4px); box-shadow: var(--shadow-lg); border-color: color-mix(in srgb, var(--primary) 50%, transparent); }
 .fan-btn:active:not(.locked) { transform: scale(.95); }
-.fan-btn .fb-icon { font-size: 27px; margin-bottom: 7px; line-height: 1; }
+.fan-btn .fb-icon { margin-bottom: 7px; line-height: 1; display: flex; justify-content: center; }
+.fan-btn .fb-icon .icon { width: 26px; height: 26px; color: var(--primary); }
+.fan-btn.locked .fb-icon .icon { color: var(--ink-dim); }
 .fan-btn .fb-label { font-size: 12px; font-weight: 700; color: var(--ink-2); }
 .fan-btn.locked { opacity: .55; cursor: pointer; }
 .fan-btn.locked .fb-label::after { content: ' (tap to teach)'; color: var(--warning); font-weight: 600; }
@@ -1225,7 +1242,7 @@ button.danger:active { transform: scale(.97); }
   display: flex; gap: 10px; margin-top: 12px;
 }
 .fan-osc .fan-btn { flex: 1; padding: 16px 8px; }
-.fan-osc .fan-btn .fb-icon { font-size: 18px; }
+.fan-osc .fan-btn .fb-icon .icon { width: 20px; height: 20px; }
 
 /* ============================ generic remote ============================ */
 .generic-grid {
@@ -1247,7 +1264,8 @@ button.danger:active { transform: scale(.97); }
 }
 .generic-btn:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); border-color: color-mix(in srgb, var(--primary) 50%, transparent); }
 .generic-btn:active { transform: scale(.95); }
-.generic-btn .gb-icon { font-size: 22px; }
+.generic-btn .gb-icon { display: flex; justify-content: center; }
+.generic-btn .gb-icon .icon { width: 24px; height: 24px; color: var(--primary); }
 .generic-btn .gb-label { font-size: 13px; font-weight: 700; word-break: break-word; }
 .add-button-tile {
   background: transparent; border: 2px dashed var(--line-strong);
@@ -1370,6 +1388,43 @@ dialog.dialog h3 { font-weight: 800; }
   #screen-home main, #screen-room main, #screen-control main { padding: 14px 14px 36px; }
   .top-bar { margin: 10px 10px 0 10px; padding: 11px 14px; }
   .floorplan-stage, .floorplan-editor { height: 56vh; }
+}
+
+/* ============================ device-tuned layout ============================ */
+/* Desktop: the dollhouse is the hero, so give it more height and keep it from
+   stretching edge-to-edge on very wide screens. Remotes stay centred. */
+[data-device="desktop"] .floorplan-stage,
+[data-device="desktop"] .floorplan-editor {
+  height: 72vh;
+  max-height: 820px;
+}
+[data-device="desktop"] #screen-home main,
+[data-device="desktop"] #screen-room main { max-width: 1180px; }
+/* A touch more breathing room around content on desktop. */
+[data-device="desktop"] #screen-home main,
+[data-device="desktop"] #screen-room main,
+[data-device="desktop"] #screen-control main { padding: 24px 24px 56px; }
+
+/* Mobile: full-bleed-ish floorplan and tighter chrome. */
+[data-device="mobile"] .floorplan-stage,
+[data-device="mobile"] .floorplan-editor {
+  height: 60vh;
+  min-height: 340px;
+}
+
+/* Touch devices: :hover sticks after a tap, so neutralise the hover "lift" on
+   the interactive cards. Tap feedback still comes from their :active states. */
+@media (hover: none) {
+  .appliance-tile:hover { transform: none; }
+  .appliance-tile:hover .ap-icon { transform: none; }
+  .scene-card:hover,
+  .add-scene-card:hover,
+  .fan-btn:hover:not(.locked),
+  .generic-btn:hover,
+  .add-button-tile:hover,
+  .icon-picker button:hover,
+  .schedule-card:hover { transform: none; box-shadow: var(--shadow); }
+  .scene-card:hover .scene-icon { transform: none; }
 }
 
 /* accessibility: respect reduced motion */
