@@ -11,23 +11,23 @@ const WALL_HEIGHT  = 1.5;
 const WALL_THICK   = 0.12;
 const ROOM_FLOOR_Y = 0;
 
-// Cartoon-y but professional wall colors — soft pastels keyed off the room icon.
-// Floors stay neutral; walls give each room its personality.
-const ICON_WALL_PALETTE = {
-  '🛋️': { wall: '#f0d9c4', floor: '#f5ecdf' },  // warm peach — Living Room
-  '🛏️': { wall: '#cbc5e3', floor: '#ece9f5' },  // soft lavender — Bedroom
-  '🍳': { wall: '#cfe6d2', floor: '#ecf4ed' },  // soft mint — Kitchen
-  '🛁': { wall: '#c4dde6', floor: '#e5eff4' },  // soft cyan — Bathroom
-  '🚪': { wall: '#e3d6c0', floor: '#f3ede0' },  // soft beige — Hallway
-  '💼': { wall: '#c8d2e0', floor: '#e8edf3' },  // soft slate — Office
-  '🎮': { wall: '#d8c4e6', floor: '#efe6f4' },  // soft violet — Game Room
-  '📚': { wall: '#e0d2b8', floor: '#f0eada' },  // soft tan — Study
-  '🪴': { wall: '#cbe2c0', floor: '#eaf2e3' },  // soft green — Balcony
-};
-const DEFAULT_PALETTE = { wall: '#e0e6ed', floor: '#f3f5f9' };
+// Room labels are scaled by their distance to the camera every frame so they
+// stay a constant (large, readable) size on screen at any zoom level. Bigger
+// number = bigger labels. The value is height-in-world per unit of distance.
+const LABEL_SCREEN_K = 0.115;
 
-function paletteForRoom(room) {
-  return ICON_WALL_PALETTE[room.icon] || DEFAULT_PALETTE;
+// One cohesive material for the whole home — no per-room tinting. Rooms read as
+// a single clean architectural model; the only colour comes from the accent
+// glow on an active room. Floors sit a touch darker than walls for interior
+// depth. Light theme = soft neutral paper; dark theme = refined slate.
+const ROOM_PALETTE_LIGHT = { wall: '#e4e9f0', floor: '#f3f5f9' };
+const ROOM_PALETTE_DARK  = { wall: '#333b4f', floor: '#222a3a' };
+// Corridors share the room tone so the house reads as one continuous structure.
+const CORRIDOR_PALETTE_LIGHT = ROOM_PALETTE_LIGHT;
+const CORRIDOR_PALETTE_DARK  = ROOM_PALETTE_DARK;
+
+function paletteForRoom(_room, isDark) {
+  return isDark ? ROOM_PALETTE_DARK : ROOM_PALETTE_LIGHT;
 }
 
 export class Floorplan {
@@ -137,10 +137,16 @@ export class Floorplan {
   // 3D — Three.js dollhouse
   // =============================================================
   _init3D() {
+    // Performance tier by device: phones get cheaper antialiasing, a lower
+    // pixel-ratio cap, a smaller shadow map and a battery-friendly GPU hint;
+    // desktops get full quality. Set once at init (these can't all change live).
+    const isMobile = document.documentElement.getAttribute('data-device') === 'mobile';
+    this._isMobile = isMobile;
     this.renderer = new THREE.WebGLRenderer({
-      canvas: this.canvas3D, antialias: true, alpha: true,
+      canvas: this.canvas3D, antialias: !isMobile, alpha: true,
+      powerPreference: isMobile ? 'low-power' : 'high-performance',
     });
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    this.renderer.setPixelRatio(Math.min(isMobile ? 1.5 : 2, window.devicePixelRatio));
     // Physically-pleasing output: filmic tone mapping + soft shadows.
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -207,7 +213,8 @@ export class Floorplan {
     const key = new THREE.DirectionalLight(0xfff6ec, 2.3);
     key.position.set(14, 22, 10);
     key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
+    const shadowRes = this._isMobile ? 1024 : 2048;
+    key.shadow.mapSize.set(shadowRes, shadowRes);
     key.shadow.radius = 6;
     key.shadow.bias = -0.0004;
     key.shadow.normalBias = 0.025;
@@ -267,7 +274,10 @@ export class Floorplan {
 
   _animate() {
     requestAnimationFrame(() => this._animate());
-    if (this.mode === 'view') {
+    // Skip all rendering when the 3D stage isn't on screen (e.g. the user is on
+    // a control/room screen). offsetParent is null for display:none ancestors,
+    // so this stops the GPU loop + saves battery while the dollhouse is hidden.
+    if (this.mode === 'view' && this.container3D.offsetParent !== null) {
       this.controls.update();
       // Animate appliance bubbles bobbing and pulsing softly
       const t = performance.now() / 1000;
@@ -287,6 +297,12 @@ export class Floorplan {
           const ds = 1 - bob * 0.16;
           o.scale.set(ds, ds, 1);
           o.material.opacity = (o.userData.discBase || 0.16) * (1 - bob * 0.28);
+        } else if (o.userData?.isLabel) {
+          // Constant on-screen size: scale with camera distance so labels read
+          // large whether the user is zoomed all the way in or out.
+          const dist = this.camera.position.distanceTo(o.position);
+          const h = dist * LABEL_SCREEN_K;
+          o.scale.set(h * (o.userData.aspect || 3.2), h, 1);
         }
       });
       this.renderer.render(this.scene, this.camera);
@@ -342,10 +358,12 @@ export class Floorplan {
       }
     }
 
-    // Corridors — neutral cream walls + floor (consistent across all corridors)
+    // Corridors — neutral walls + floor (consistent across all corridors)
+    const isDarkScene = (document.documentElement.getAttribute('data-theme') === 'dark');
+    const corrPal = isDarkScene ? CORRIDOR_PALETTE_DARK : CORRIDOR_PALETTE_LIGHT;
     const corridors = this._findCorridors(placements);
-    const corrWallMat  = new THREE.MeshStandardMaterial({ color: 0xe6dcc6, roughness: 0.9, metalness: 0 });
-    const corrFloorMat = new THREE.MeshStandardMaterial({ color: 0xf3ede0, roughness: 0.95, metalness: 0 });
+    const corrWallMat  = new THREE.MeshStandardMaterial({ color: new THREE.Color(corrPal.wall), roughness: 0.9, metalness: 0 });
+    const corrFloorMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(corrPal.floor), roughness: 0.95, metalness: 0 });
     for (const c of corridors) {
       const isHorizontal = c.width > c.height;
       const cFloor = new THREE.Mesh(
@@ -418,9 +436,15 @@ export class Floorplan {
   _buildRoomMesh(room, fp, { isActive, highlightColor, activeColor }) {
     const g = new THREE.Group();
     const w = fp.width, d = fp.height, x = fp.x, z = fp.y;
-    const pal = paletteForRoom(room);
+    const isDark = (document.documentElement.getAttribute('data-theme') === 'dark');
+    const pal = paletteForRoom(room, isDark);
     const wallColor  = new THREE.Color(pal.wall);
-    const floorColor = new THREE.Color(isActive ? activeColor.getHexString() : pal.floor);
+    // Active rooms glow in the accent colour. In dark mode the key light + ACES
+    // tone mapping would blow a bright base colour out to white, so we keep a
+    // darkened base and let the emissive provide the recognisable glow.
+    const floorColor = isActive
+      ? (isDark ? activeColor.clone().multiplyScalar(0.4) : activeColor.clone())
+      : new THREE.Color(pal.floor);
 
     // Floor — PBR so the lighting rig produces gentle gradients + receives shadows.
     const floorMat = new THREE.MeshStandardMaterial({
@@ -428,7 +452,7 @@ export class Floorplan {
     });
     if (isActive) {
       floorMat.emissive = activeColor.clone();
-      floorMat.emissiveIntensity = 0.35;
+      floorMat.emissiveIntensity = isDark ? 0.5 : 0.35;
     }
     const floor = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), floorMat);
     floor.position.set(x + w / 2, ROOM_FLOOR_Y, z + d / 2);
@@ -589,8 +613,16 @@ export class Floorplan {
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
 
-    const cs = getComputedStyle(document.documentElement);
-    const fg = cs.getPropertyValue('--ink').trim() || '#0f172a';
+    const isDark = (document.documentElement.getAttribute('data-theme') === 'dark');
+    // Glassy pill that fits the active theme: white frosted on light, deep
+    // navy-glass on dark (a white pill in dark mode hides the light text).
+    const pill = isDark
+      ? { fill: 'rgba(20, 28, 52, 0.92)', shadow: 'rgba(0, 0, 0, 0.45)',
+          gradTop: 'rgba(255,255,255,0.06)', gradBot: 'rgba(0,0,0,0.10)',
+          border: 'rgba(255,255,255,0.16)', text: '#eef2fc' }
+      : { fill: 'rgba(255, 255, 255, 0.96)', shadow: 'rgba(15, 23, 42, 0.22)',
+          gradTop: 'rgba(255,255,255,0.0)', gradBot: 'rgba(15,23,42,0.04)',
+          border: 'rgba(15, 23, 42, 0.10)', text: '#0f172a' };
 
     ctx.font = '700 56px "Plus Jakarta Sans", -apple-system, sans-serif';
     const iconText = room.icon || '🚪';
@@ -607,10 +639,10 @@ export class Floorplan {
     const radius = 36;
 
     // Soft drop shadow under the pill
-    ctx.shadowColor = 'rgba(15, 23, 42, 0.22)';
+    ctx.shadowColor = pill.shadow;
     ctx.shadowBlur = 32;
     ctx.shadowOffsetY = 12;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
+    ctx.fillStyle = pill.fill;
     this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
     ctx.fill();
 
@@ -621,20 +653,20 @@ export class Floorplan {
 
     // Subtle inner gradient for a slight "frosted" feel
     const grad = ctx.createLinearGradient(0, boxY, 0, boxY + boxH);
-    grad.addColorStop(0, 'rgba(255,255,255,0.0)');
-    grad.addColorStop(1, 'rgba(15,23,42,0.04)');
+    grad.addColorStop(0, pill.gradTop);
+    grad.addColorStop(1, pill.gradBot);
     ctx.fillStyle = grad;
     this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
     ctx.fill();
 
     // Thin border line for crispness
-    ctx.strokeStyle = 'rgba(15, 23, 42, 0.10)';
+    ctx.strokeStyle = pill.border;
     ctx.lineWidth = 2;
     this._roundRect(ctx, boxX, boxY, boxW, boxH, radius);
     ctx.stroke();
 
     // Text
-    ctx.fillStyle = fg;
+    ctx.fillStyle = pill.text;
     ctx.textBaseline = 'middle';
     ctx.fillText(iconText, boxX + padX, boxY + boxH / 2 + 2);
     ctx.fillText(nameText, boxX + padX + iconWidth + gap, boxY + boxH / 2 + 2);
@@ -644,9 +676,14 @@ export class Floorplan {
     tex.anisotropy = 8;
     const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(5.6, 1.75, 1);
-    sprite.renderOrder = 999;
+    // The label keeps a constant on-screen size: each frame _animate() scales it
+    // by camera distance (see LABEL_SCREEN_K). We store the canvas aspect ratio
+    // so width/height stay correct while only the overall size tracks zoom.
+    const aspect = canvas.width / canvas.height;
     sprite.userData.isLabel = true;
+    sprite.userData.aspect = aspect;
+    sprite.scale.set(aspect, 1, 1);
+    sprite.renderOrder = 999;
     return sprite;
   }
   _roundRect(ctx, x, y, w, h, r) {
