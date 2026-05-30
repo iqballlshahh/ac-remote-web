@@ -53,14 +53,14 @@
         <div id="user-email" class="dim small"></div>
       </div>
     </div>
-    <button class="icon-btn" id="theme-btn"  title="toggle theme">🌓</button>
-    <button class="icon-btn" id="logout-btn" title="sign out">⏻</button>
+    <button class="icon-btn" id="theme-btn"  title="toggle theme" aria-label="toggle theme"><svg class="icon icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg></button>
+    <button class="icon-btn" id="logout-btn" title="sign out" aria-label="sign out"><svg class="icon icon-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="2" x2="12" y2="12"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg></button>
   </header>
 
   <main>
     <div class="home-mode-toggle">
-      <button class="active" data-home-mode="view">🏠 Home</button>
-      <button data-home-mode="edit">✎ Edit Layout</button>
+      <button class="active" data-home-mode="view"><svg class="icon icon-home" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9.5 12 3l9 6.5V21H3z"/><path d="M9 21v-6h6v6"/></svg> Home</button>
+      <button data-home-mode="edit"><svg class="icon icon-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg> Edit Layout</button>
     </div>
 
     <!-- 3D dollhouse view -->
@@ -115,9 +115,9 @@
 <!-- ================= ROOM (appliances in a single room) ================= -->
 <div id="screen-room" class="screen">
   <header class="top-bar">
-    <button class="icon-btn" id="room-back-btn">←</button>
+    <button class="icon-btn" id="room-back-btn" aria-label="back"><svg class="icon icon-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg></button>
     <h2 id="room-name"></h2>
-    <button class="icon-btn" id="room-edit-btn"  title="edit room">✎</button>
+    <button class="icon-btn" id="room-edit-btn"  title="edit room"><svg class="icon icon-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg></button>
   </header>
   <main>
     <div id="room-appliances" class="appliance-list"></div>
@@ -131,9 +131,9 @@
 <!-- ================= APPLIANCE CONTROL ================= -->
 <div id="screen-control" class="screen">
   <header class="top-bar">
-    <button class="icon-btn" id="control-back-btn">←</button>
+    <button class="icon-btn" id="control-back-btn" aria-label="back"><svg class="icon icon-back" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg></button>
     <h2 id="control-title"></h2>
-    <button class="icon-btn" id="control-settings-btn" title="settings">⚙</button>
+    <button class="icon-btn" id="control-settings-btn" title="settings"><svg class="icon icon-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   </header>
   <main>
     <div id="control-body"></div>
